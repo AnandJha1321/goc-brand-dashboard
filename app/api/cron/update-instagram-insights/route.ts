@@ -1,0 +1,396 @@
+import { NextResponse } from "next/server";
+import dayjs from "dayjs";
+import { createClient as createAdminSupabaseClient } from "@supabase/supabase-js";
+import { isInstagramInsightsQueueEnabled } from "@/lib/queue/instagram-insights-queue";
+import {
+  isContestEligibleForScheduledMetricsRefresh,
+  isPostContestMetricsLocked,
+  SCHEDULED_METRICS_REFRESH_POST_CONTEST_OR_FILTER,
+} from "@/lib/contest-metrics-refresh-eligibility";
+import { bumpContestLastMetricsUpdated } from "@/lib/contest-last-metrics-updated";
+import {
+  fetchInsights as fetchInsightsShared,
+  hasStatsChanged as hasStatsChangedShared,
+  isTokenExpiring as isTokenExpiringShared,
+  mergeInstagramStats,
+  refreshToken as refreshTokenShared,
+} from "@/lib/instagram-insights";
+import { updateCpmContestBudgets } from "@/lib/instagram-cpm-contest-budgets";
+import { insertMetaGraphUsageLogRow } from "@/lib/meta-graph/meta-graph-usage-log";
+import type { MetaGraphUsageAccumulator } from "@/lib/meta-graph/usage-accumulator";
+
+// 🎯 Types
+interface InstagramAccount {
+  access_token: string;
+  token_expiry: string;
+  app_scoped_user_id: string;
+  account_type?: "BUSINESS" | "MEDIA_CREATOR" | "PERSONAL";
+}
+
+interface Submission {
+  id: string;
+  creator_id: string;
+  contest_id: string;
+  video_id: string;
+  views: number | null;
+  other_stats: any | null;
+}
+
+interface Creator {
+  id: string;
+  instagram_account: InstagramAccount;
+}
+
+interface SubmissionUpdate {
+  id: string;
+  views: number;
+  other_stats: any;
+  updated_at: string;
+}
+
+interface TokenUpdate {
+  userId: string;
+  newAccountData: InstagramAccount;
+}
+
+const isTokenExpiring = isTokenExpiringShared;
+const hasStatsChanged = hasStatsChangedShared;
+
+async function refreshToken(
+  creatorId: string,
+  accessToken: string,
+  usageAccumulator?: MetaGraphUsageAccumulator
+): Promise<string | null> {
+  const result = await refreshTokenShared(
+    creatorId,
+    accessToken,
+    usageAccumulator
+  );
+  return result?.access_token ?? null;
+}
+
+async function fetchInsights(
+  submission: Submission,
+  accessToken: string,
+  usageAccumulator?: MetaGraphUsageAccumulator
+): Promise<{ views: number; stats: Record<string, number> } | null> {
+  const result = await fetchInsightsShared(
+    {
+      id: submission.id,
+      creator_id: submission.creator_id,
+      video_id: submission.video_id,
+      views: submission.views,
+      other_stats: submission.other_stats,
+    },
+    accessToken,
+    usageAccumulator
+  );
+  if (result.kind !== "success") {
+    console.error(
+      `Insights fetch failed for submission ${submission.id}:`,
+      result.message ?? result.classification
+    );
+    return null;
+  }
+  return { views: result.views, stats: result.stats };
+}
+
+// 🚀 Main handler - Now optimized, readable, and efficient!
+export async function GET(request: Request) {
+  // Auth check
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const supabaseAdmin = createAdminSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
+  try {
+    const url = new URL(request.url);
+    const contestId = url.searchParams.get("contestId");
+
+    // Determine active contests up-front to avoid touching finalized ones
+    let activeIds: string[] | undefined = undefined;
+    if (contestId) {
+      const { data: c } = await supabaseAdmin
+        .from("contests")
+        .select("id, views_locked_at, post_contest_status")
+        .eq("id", contestId)
+        .single();
+      if (!c || !isContestEligibleForScheduledMetricsRefresh(c)) {
+        const locked = c && isPostContestMetricsLocked(c.post_contest_status);
+        return NextResponse.json({
+          message: locked
+            ? `Contest ${contestId} is locked for review; nothing to update`
+            : `Contest ${contestId} is finalized or not found; nothing to update`,
+        });
+      }
+    } else {
+      const { data: activeContests } = await supabaseAdmin
+        .from("contests")
+        .select("id, post_contest_status, views_locked_at")
+        .is("views_locked_at", null)
+        .or(SCHEDULED_METRICS_REFRESH_POST_CONTEST_OR_FILTER);
+      const eligibleContests = (activeContests || []).filter(
+        isContestEligibleForScheduledMetricsRefresh,
+      );
+      activeIds = eligibleContests.map((c: any) => c.id);
+      if (!activeIds.length) {
+        return NextResponse.json({ message: "No active contests to update" });
+      }
+    }
+
+    console.log(
+      `🚀 Starting Instagram insights update${
+        contestId ? ` for contest ${contestId}` : ""
+      }`
+    );
+
+    if (isInstagramInsightsQueueEnabled()) {
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL?.trim() || "http://localhost:3000";
+      const contestIdsToEnqueue = contestId ? [contestId] : activeIds ?? [];
+      const results: Array<{ id: string; runId?: string; alreadyActive?: boolean }> = [];
+      for (const cid of contestIdsToEnqueue) {
+        try {
+          const res = await fetch(
+            `${baseUrl.replace(/\/$/, "")}/api/contests/${cid}/instagram-insights-refresh/enqueue`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(process.env.CRON_SECRET ? { Authorization: `Bearer ${process.env.CRON_SECRET}` } : {}),
+              },
+            }
+          );
+          const data = await res.json().catch(() => ({}));
+          results.push({ id: cid, runId: data.runId, alreadyActive: data.alreadyActive });
+        } catch (e) {
+          console.warn(`[update-instagram-insights] Enqueue for ${cid} failed:`, e);
+        }
+      }
+      return NextResponse.json({
+        message: "Instagram insights refresh enqueued for contest(s)",
+        queueEnabled: true,
+        results,
+      });
+    }
+
+    // 📥 Fetch submissions (only from active contests)
+    let submissionsQuery = supabaseAdmin
+      .from("submissions")
+      .select("id, creator_id, contest_id, video_id, views, other_stats")
+      .eq("platform", "instagram")
+      .not("video_id", "is", null);
+
+    if (contestId) {
+      submissionsQuery = submissionsQuery.eq("contest_id", contestId);
+    } else if (activeIds && activeIds.length) {
+      submissionsQuery = submissionsQuery.in("contest_id", activeIds);
+    }
+
+    const { data: submissions, error: submissionError } =
+      await submissionsQuery;
+
+    if (submissionError) {
+      throw new Error(
+        `Failed to fetch submissions: ${submissionError.message}`
+      );
+    }
+
+    if (!submissions?.length) {
+      return NextResponse.json({
+        message: `No submissions to update${
+          contestId ? ` for contest ${contestId}` : ""
+        }`,
+      });
+    }
+
+    console.log(`📊 Processing ${submissions.length} submissions`);
+
+    // 👥 Group by creator (more efficient than loops)
+    const submissionsByCreator = submissions.reduce((acc, sub) => {
+      if (!acc[sub.creator_id]) acc[sub.creator_id] = [];
+      acc[sub.creator_id].push(sub);
+      return acc;
+    }, {} as Record<string, Submission[]>);
+
+    const creatorIds = Object.keys(submissionsByCreator);
+
+    // 🔍 Fetch creator profiles (only Instagram account data - no unnecessary fields!)
+    const { data: creators, error: profilesError } = await supabaseAdmin
+      .from("creator_profiles")
+      .select("id, instagram_account")
+      .in("id", creatorIds)
+      .not("instagram_account", "is", null);
+
+    if (profilesError) {
+      throw new Error(
+        `Failed to fetch creator profiles: ${profilesError.message}`
+      );
+    }
+
+    if (!creators?.length) {
+      await updateCpmContestBudgets(supabaseAdmin, contestId || undefined);
+      return NextResponse.json({
+        message:
+          "No connected Instagram accounts found, budget tracking completed",
+      });
+    }
+
+    // 🔄 Process insights efficiently
+    const updates: SubmissionUpdate[] = [];
+    const tokenUpdates: TokenUpdate[] = [];
+    const usageAccumulator: MetaGraphUsageAccumulator = {};
+
+    for (const creator of creators as Creator[]) {
+      const account = creator.instagram_account;
+      const userSubmissions = submissionsByCreator[creator.id];
+
+      // Skip invalid accounts
+      if (
+        !account?.access_token ||
+        (account.account_type !== "BUSINESS" &&
+          account.account_type !== "MEDIA_CREATOR")
+      ) {
+        continue;
+      }
+
+      let accessToken = account.access_token;
+
+      // 🔄 Refresh token if needed
+      if (account.token_expiry && isTokenExpiring(account.token_expiry)) {
+        const newToken = await refreshToken(
+          creator.id,
+          accessToken,
+          usageAccumulator
+        );
+        if (!newToken) continue;
+
+        accessToken = newToken;
+        tokenUpdates.push({
+          userId: creator.id,
+          newAccountData: {
+            ...account,
+            access_token: newToken,
+            token_expiry: dayjs().add(3600, "second").toISOString(),
+          },
+        });
+      }
+
+      // 📊 Process submissions for this creator
+      for (const submission of userSubmissions) {
+        if (!submission.video_id) continue;
+
+        const result = await fetchInsights(
+          submission,
+          accessToken,
+          usageAccumulator
+        );
+        if (!result) continue;
+
+        const { views, stats } = result;
+
+        if (
+          hasStatsChanged(
+            submission.views,
+            views,
+            submission.other_stats,
+            stats
+          )
+        ) {
+          const prevOther =
+            (submission.other_stats as Record<string, unknown>) || {};
+          const prevIg =
+            prevOther.instagram &&
+            typeof prevOther.instagram === "object" &&
+            !Array.isArray(prevOther.instagram)
+              ? (prevOther.instagram as Record<string, unknown>)
+              : {};
+          updates.push({
+            id: submission.id,
+            views,
+            other_stats: {
+              ...prevOther,
+              instagram: mergeInstagramStats(prevIg, stats),
+            },
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    await insertMetaGraphUsageLogRow({
+      source: "instagram_insights_cron",
+      contestId: contestId || null,
+      runId: null,
+      batchIndex: null,
+      accumulator: usageAccumulator,
+    });
+
+    // 💾 Batch database updates (much more efficient!)
+    const now = new Date().toISOString();
+
+    if (tokenUpdates.length > 0) {
+      console.log(`🔄 Updating ${tokenUpdates.length} tokens`);
+      await Promise.allSettled(
+        tokenUpdates.map((update) =>
+          supabaseAdmin
+            .from("creator_profiles")
+            .update({
+              instagram_account: update.newAccountData,
+              updated_at: now,
+            })
+            .eq("id", update.userId)
+        )
+      );
+    }
+
+    if (updates.length > 0) {
+      console.log(`📊 Updating ${updates.length} submissions`);
+      await Promise.allSettled(
+        updates.map((update) =>
+          supabaseAdmin
+            .from("submissions")
+            .update({
+              views: update.views,
+              other_stats: update.other_stats,
+              last_insights_update: now,
+              updated_at: update.updated_at,
+            })
+            .eq("id", update.id)
+        )
+      );
+
+      const updatedIds = new Set(updates.map((u) => u.id));
+      const contestIdsUpdated = [
+        ...new Set(
+          submissions
+            .filter((s) => updatedIds.has(s.id))
+            .map((s) => s.contest_id)
+            .filter(Boolean),
+        ),
+      ];
+      await bumpContestLastMetricsUpdated(supabaseAdmin, contestIdsUpdated);
+    }
+
+    await updateCpmContestBudgets(supabaseAdmin, contestId || undefined);
+
+    console.log(
+      `✅ Instagram insights update completed. Updated ${updates.length} submissions`
+    );
+    return NextResponse.json({
+      message: `Updated ${updates.length} Instagram submissions${
+        contestId ? ` for contest ${contestId}` : ""
+      } and CPM budgets`,
+    });
+  } catch (error: any) {
+    console.error("❌ Instagram insights update failed:", error.message);
+    return NextResponse.json(
+      { error: `Cron job failed: ${error.message}` },
+      { status: 500 }
+    );
+  }
+}

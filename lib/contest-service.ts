@@ -1,0 +1,746 @@
+import { SupabaseClient } from "@supabase/supabase-js";
+import {
+  Submission,
+} from "@/lib/contest-utils";
+import { calculateTwitterCpmBudgetSpent } from "@/lib/contest-utils-client";
+import { createClient } from "@/utils/supabase/server";
+import {
+  contestCache,
+  contestDetailsCache,
+  getContestsCacheKey,
+  getContestDetailsCacheKey,
+  clearContestsCache,
+} from "@/lib/cache-utils";
+import {
+  isCpmContestType,
+  isDualRewardsContestType,
+  isMilestoneContestType,
+} from "@/lib/contest-type";
+import {
+  computeBudgetFilledCents,
+  computeBudgetPaidCents,
+  getBudgetTileMode,
+  type BudgetTileSubmission,
+} from "@/lib/contest-budget-tile-metrics";
+import {
+  fetchContestSubmissionsAllPages,
+  fetchContestTwitterTweetsAllPages,
+} from "@/lib/fetch-contest-submissions";
+import { resolveMaxEarningsPerCreatorCents, withProjectedTopLevelPayout, contestHasUsableCpmRate, contestHasUsableMilestoneLadder, resolveCpmContestConfigForPlatform, resolveLeaderboardFlatFeeBonusBudgetCents, readPersistedPlatformCampaigns, parseVideoContestPlatforms, VIDEO_CONTEST_PLATFORMS } from "@/lib/video-platform-campaigns";
+import {
+  buildFlatFeeBonusExpectedCentsBySubmissionId,
+  getFlatFeeBonusCentsFromContest,
+  toFlatFeeBonusSubmissionInput,
+} from "@/lib/twitter-cpm-bonus-expected";
+
+type ContestWithDetails = {
+  id: string;
+  contest_based_details: Record<string, any> | null;
+  contest_type?: string | null;
+  platform?: string | null;
+  contest_format?: string | null;
+  max_earnings_per_creator?: number | null;
+  // Include all other fields returned by contests_with_status
+  [key: string]: any;
+};
+
+/** In-memory view: project primary platform payout onto root for legacy readers. */
+const normalizeContestDetails = (
+  contest: ContestWithDetails,
+): Record<string, any> =>
+  withProjectedTopLevelPayout(
+    contest.contest_based_details || {},
+    contest.platform,
+  ) as Record<string, any>;
+
+function resolveCpmConfigForBudgetSub(
+  details: Record<string, unknown> | null,
+  platformCsv?: string | null,
+) {
+  return (sub: { platform?: string | null }) => {
+    const cfg = resolveCpmContestConfigForPlatform(
+      details,
+      sub.platform,
+      platformCsv,
+    );
+    if (!cfg) return null;
+    return {
+      cpmRate: cfg.cpm_rate_usd,
+      minViews: cfg.min_views,
+      maxViews: cfg.max_views,
+    };
+  };
+}
+
+const DEFAULT_SELECT = "*, contest_based_details";
+const SELECT_WITH_ADVERTISER_PROFILE = `${DEFAULT_SELECT}, advertiser_profiles!advertiser_id(company_name)`;
+
+interface FetchContestsOptions {
+  advertiserId?: string;
+  includeAdvertiserProfile?: boolean;
+}
+
+async function fetchContestsWithDetails(
+  supabase: SupabaseClient,
+  options: FetchContestsOptions = {},
+) {
+  const cacheKey = getContestsCacheKey(options);
+  const cachedData = contestCache.get<ContestWithDetails[]>(cacheKey);
+
+  if (cachedData) {
+    return cachedData;
+  }
+
+  const selectClause = options.includeAdvertiserProfile
+    ? SELECT_WITH_ADVERTISER_PROFILE
+    : DEFAULT_SELECT;
+
+  let query = supabase
+    .from("contests_with_status")
+    .select(selectClause)
+    .order("created_at", { ascending: false });
+
+  if (options.advertiserId) {
+    query = query.eq("advertiser_id", options.advertiserId);
+  }
+
+  const { data = [] } = (await query) as unknown as {
+    data: ContestWithDetails[];
+  };
+
+  contestCache.set(cacheKey, data);
+  return data;
+}
+
+export async function enrichContestWithCalculatedBudgets(
+  contest: ContestWithDetails,
+  supabase: SupabaseClient,
+) {
+  const cacheKey = getContestDetailsCacheKey(contest.id);
+  const isMilestone = isMilestoneContestType(contest.contest_type);
+  // Milestone budget_spent is derived from live submissions; do not serve stale cached rows.
+  if (!isMilestone) {
+    const cachedData = contestDetailsCache.get<ContestWithDetails>(cacheKey);
+    if (cachedData) {
+      return cachedData;
+    }
+  }
+
+  let updatedContest: ContestWithDetails = {
+    ...contest,
+    contest_based_details: contest.contest_based_details || {},
+  };
+
+  const contestDetails = normalizeContestDetails(updatedContest);
+  const leaderboard = contestDetails?.leaderboard_contest || {};
+  const cpmDetails = contestDetails?.cpm_contest || {};
+
+  const isTwitterTextImage =
+    (contest.platform?.toLowerCase() === "twitter" ||
+      contest.platform?.toLowerCase() === "x") &&
+    contest.contest_format === "text_image";
+
+  if (isTwitterTextImage) {
+    const { data: metrics } = await supabase
+      .from("twitter_campaign_metrics")
+      .select("total_participants, max_participants")
+      .eq("contest_id", contest.id)
+      .maybeSingle();
+
+    if (metrics) {
+      updatedContest.twitter_participants_count =
+        metrics.total_participants || 0;
+      updatedContest.twitter_max_participants = metrics.max_participants;
+    } else {
+      updatedContest.twitter_participants_count = 0;
+      updatedContest.twitter_max_participants = null;
+    }
+  }
+
+  const leaderboardBonusBudgetCents = resolveLeaderboardFlatFeeBonusBudgetCents(
+    contestDetails,
+    contest.platform,
+  );
+  const leaderboardFlatFeeBonusCents = getFlatFeeBonusCentsFromContest({
+    contest_type: contest.contest_type,
+    platform: contest.platform,
+    contest_based_details: contestDetails,
+  });
+
+  if (
+    contest.contest_type === "leaderboard" &&
+    leaderboardBonusBudgetCents > 0 &&
+    leaderboardFlatFeeBonusCents > 0
+  ) {
+    let leaderboardSubmissions: Submission[] = [];
+    let leaderboardFetchOk = false;
+
+    if (isTwitterTextImage) {
+      const { data: twitterTweets, error: twitterError } =
+        await fetchContestTwitterTweetsAllPages(
+          supabase,
+          contest.id,
+          "id, creator_id, tweet_created_at, moderation_status, is_eligible, deleted_at",
+          {
+            isEligible: true,
+            deletedAtNull: true,
+            moderationStatusIn: ["verified", "paid"],
+            order: { column: "tweet_created_at", ascending: true },
+          },
+        );
+
+      if (twitterError) {
+        console.error(
+          "Failed to load leaderboard Twitter tweets for contest",
+          contest.id,
+          String((twitterError as { message?: string })?.message ?? twitterError),
+        );
+      } else {
+        leaderboardFetchOk = true;
+        leaderboardSubmissions = (twitterTweets || [])
+          .filter((tweet: any) => tweet.creator_id)
+          .map((tweet: any) => ({
+            id: tweet.id,
+            creator_id: tweet.creator_id,
+            created_at: tweet.tweet_created_at || new Date().toISOString(),
+            status: tweet.moderation_status,
+            is_eligible: tweet.is_eligible === true,
+            deleted_at: tweet.deleted_at ?? null,
+            paid: tweet.moderation_status === "paid",
+            earnings: null,
+            bonus_paid: false,
+            is_twitter_tweet: true as const,
+            platform: "twitter" as const,
+          }));
+      }
+    } else {
+      const { data: submissions, error: submissionsError } =
+        await fetchContestSubmissionsAllPages(
+        supabase,
+        contest.id,
+        "id, paid, earnings, bonus_paid, bonus_amount, creator_id, created_at, status, views, platform",
+        { statusIn: ["verified", "paid"], order: { column: "created_at", ascending: true } },
+      );
+
+      if (submissionsError) {
+        console.error(
+          "Failed to load leaderboard submissions for contest",
+          contest.id,
+          String((submissionsError as { message?: string })?.message ?? submissionsError),
+        );
+      } else {
+        leaderboardFetchOk = true;
+        leaderboardSubmissions = (submissions || []).map((submission: any) => ({
+        id: submission.id,
+        paid: submission.paid,
+        earnings: submission.earnings,
+        bonus_paid: submission.bonus_paid,
+        bonus_amount:
+          submission.bonus_amount !== null &&
+          submission.bonus_amount !== undefined
+            ? submission.bonus_amount
+            : undefined,
+        creator_id: submission.creator_id,
+        created_at: submission.created_at,
+        status: submission.status || undefined,
+        views: submission.views,
+        platform: submission.platform,
+      }));
+      }
+    }
+
+    if (leaderboardFetchOk) {
+    const expectedBonusBySubmissionId =
+      buildFlatFeeBonusExpectedCentsBySubmissionId(
+        {
+          contest_type: contest.contest_type,
+          platform: contest.platform,
+          contest_based_details: contestDetails,
+        },
+        leaderboardSubmissions.map((submission) =>
+          toFlatFeeBonusSubmissionInput({
+            id: String(submission.id || ""),
+            created_at: submission.created_at,
+            status: submission.status,
+            paid: submission.paid,
+            platform: submission.platform,
+            is_twitter_tweet: (submission as { is_twitter_tweet?: boolean })
+              .is_twitter_tweet,
+            moderation_status: (submission as { moderation_status?: string })
+              .moderation_status,
+          }),
+        ),
+      );
+    let bonusSpentCents = 0;
+    for (const cents of expectedBonusBySubmissionId.values()) {
+      bonusSpentCents += cents;
+    }
+
+    const nextDetails: Record<string, unknown> = { ...contestDetails };
+    const campaigns = readPersistedPlatformCampaigns(contestDetails);
+    const campaignPlatforms = VIDEO_CONTEST_PLATFORMS.filter(
+      (platform) => campaigns[platform],
+    );
+    if (campaignPlatforms.length >= 2) {
+      for (const platform of campaignPlatforms) {
+        const campaign = campaigns[platform];
+        if (!campaign?.leaderboard_contest) continue;
+        let platformSpent = 0;
+        for (const submission of leaderboardSubmissions) {
+          const key = parseVideoContestPlatforms(submission.platform)[0];
+          if (key !== platform) continue;
+          platformSpent +=
+            expectedBonusBySubmissionId.get(String(submission.id || "")) || 0;
+        }
+        nextDetails[platform] = {
+          ...campaign,
+          leaderboard_contest: {
+            ...campaign.leaderboard_contest,
+            budget_spent: platformSpent,
+          },
+        };
+      }
+    }
+
+    updatedContest = {
+      ...updatedContest,
+      contest_based_details: {
+        ...nextDetails,
+        leaderboard_contest: {
+          ...leaderboard,
+          budget_spent: bonusSpentCents,
+        },
+      },
+    };
+    }
+  }
+
+  const platformSlug = (contest.platform || "").toLowerCase();
+  const hasCpmRate =
+    cpmDetails?.cpm_rate_usd > 0 ||
+    contestHasUsableCpmRate(contestDetails, contest.platform);
+  const isTwitterPlatform = platformSlug === "twitter" || platformSlug === "x";
+
+  if (contest.contest_type === "cpm" && isTwitterPlatform && hasCpmRate) {
+    const { data: twitterTweets, error: twitterCpmError } =
+      await fetchContestTwitterTweetsAllPages(
+      supabase,
+      contest.id,
+      `
+            id,
+            creator_id,
+            tweet_created_at,
+            points,
+            moderation_status,
+            manual_points_adjustment,
+            is_eligible,
+            deleted_at,
+            earnings,
+            bonus_paid,
+            bonus_amount
+          `,
+      {
+        isEligible: true,
+        deletedAtNull: true,
+        moderationStatusIn: ["verified", "paid"],
+        order: { column: "tweet_created_at", ascending: true },
+      },
+    );
+
+    if (twitterCpmError) {
+      console.error(
+        "Failed to load Twitter CPM tweets for contest",
+        contest.id,
+        String((twitterCpmError as { message?: string })?.message ?? twitterCpmError),
+      );
+    } else {
+    const submissions =
+      (twitterTweets?.map((tweet: any) => ({
+        id: tweet.id,
+        creator_id: tweet.creator_id,
+        created_at: tweet.tweet_created_at,
+        platform: "twitter",
+        status: tweet.moderation_status,
+        is_eligible: tweet.is_eligible === true,
+        deleted_at: tweet.deleted_at ?? null,
+        is_twitter_tweet: true as const,
+        paid: tweet.moderation_status === "paid",
+        paid_at: null,
+        earnings: tweet.earnings ?? null,
+        bonus_paid: tweet.bonus_paid ?? false,
+        bonus_amount: tweet.bonus_amount ?? undefined,
+        other_stats: {
+          base_points: tweet.points || 0,
+          manual_points_adjustment: tweet.manual_points_adjustment || 0,
+        },
+        manual_points_adjustment: tweet.manual_points_adjustment || 0,
+        views: 0,
+      })) as Submission[]) || [];
+
+    const { data: leaderboardAdjustments } = await supabase
+      .from("twitter_campaign_leaderboard")
+      .select("creator_id, manual_points_adjustment")
+      .eq("contest_id", contest.id);
+
+    const manualAdjustmentMap: Record<string, number> = {};
+    (leaderboardAdjustments || []).forEach((entry: any) => {
+      if (
+        entry.creator_id &&
+        typeof entry.manual_points_adjustment === "number"
+      ) {
+        manualAdjustmentMap[entry.creator_id] = entry.manual_points_adjustment;
+      }
+    });
+
+    const resolvedMaxEarnings = resolveMaxEarningsPerCreatorCents(
+      contest,
+      contest.platform,
+    );
+    const tileInput = {
+      contest_type: contest.contest_type,
+      post_contest_status: contest.post_contest_status,
+      max_earnings_per_creator: contest.max_earnings_per_creator,
+      contest_based_details: contestDetails,
+      platform: contest.platform,
+    };
+    const budgetSubs: BudgetTileSubmission[] = submissions.map((s) => ({
+      ...s,
+      paid_at: (s as BudgetTileSubmission).paid_at ?? null,
+    }));
+    const mode = getBudgetTileMode(contest.post_contest_status);
+    const budgetSpentCents =
+      mode === "paid"
+        ? computeBudgetPaidCents(tileInput, budgetSubs)
+        : Math.round(
+            calculateTwitterCpmBudgetSpent(
+              submissions,
+              cpmDetails.cpm_rate_usd,
+              resolvedMaxEarnings ||
+                cpmDetails.max_earnings_per_creator ||
+                null,
+              cpmDetails.min_views,
+              cpmDetails.max_views,
+              cpmDetails.flat_fee_bonus || 0,
+              cpmDetails.flat_fee_bonus_cap || null,
+              manualAdjustmentMap,
+              resolveCpmConfigForBudgetSub(contestDetails, contest.platform),
+            ) * 100,
+          );
+
+    updatedContest = {
+      ...updatedContest,
+      contest_based_details: {
+        ...contestDetails,
+        cpm_contest: {
+          ...cpmDetails,
+          budget_spent: budgetSpentCents,
+        },
+      },
+    };
+    }
+  } else if (
+    isCpmContestType(contest.contest_type) &&
+    !isDualRewardsContestType(contest.contest_type) &&
+    hasCpmRate
+  ) {
+    const { data: submissions, error: submissionsError } =
+      await fetchContestSubmissionsAllPages(
+        supabase,
+        contest.id,
+        `
+              id,
+              creator_id,
+              created_at,
+              status,
+              paid,
+              earnings,
+              views,
+              platform,
+              other_stats,
+              bonus_paid,
+              bonus_amount
+            `,
+        {
+          statusIn: ["verified", "paid"],
+          order: { column: "created_at", ascending: true },
+        },
+      );
+
+    if (!submissionsError) {
+      const submissionRecords = (submissions || []).map((submission: any) => ({
+        id: submission.id,
+        creator_id: submission.creator_id,
+        created_at: submission.created_at,
+        status: submission.status || undefined,
+        paid: submission.paid ?? false,
+        earnings: submission.earnings,
+        views: submission.views,
+        platform: submission.platform || undefined,
+        other_stats: submission.other_stats,
+        bonus_paid: submission.bonus_paid ?? false,
+        bonus_amount: submission.bonus_amount ?? undefined,
+      }));
+
+      const tileInput = {
+        contest_type: contest.contest_type,
+        post_contest_status: contest.post_contest_status,
+        max_earnings_per_creator: contest.max_earnings_per_creator,
+        contest_based_details: contest.contest_based_details,
+        platform: contest.platform,
+        bonus_details: contest.bonus_details,
+      };
+      const mode = getBudgetTileMode(contest.post_contest_status);
+      const budgetSpentCents =
+        mode === "paid"
+          ? computeBudgetPaidCents(
+              tileInput,
+              submissionRecords as BudgetTileSubmission[],
+            )
+          : computeBudgetFilledCents(
+              tileInput,
+              submissionRecords as BudgetTileSubmission[],
+            );
+
+      updatedContest = {
+        ...updatedContest,
+        contest_based_details: {
+          ...contestDetails,
+          cpm_contest: {
+            ...cpmDetails,
+            budget_spent: budgetSpentCents,
+          },
+          pool_budget_spent_cents: budgetSpentCents,
+        },
+      };
+    } else {
+      console.error(
+        "Failed to calculate CPM budget for contest",
+        contest.id,
+        String((submissionsError as { message?: string })?.message ?? submissionsError),
+      );
+    }
+  }
+
+  const milestoneContestDetails =
+    normalizeContestDetails(updatedContest).milestone_contest;
+  if (
+    isMilestoneContestType(contest.contest_type) &&
+    !isDualRewardsContestType(contest.contest_type) &&
+    (contestHasUsableMilestoneLadder(
+      contest.contest_based_details,
+      contest.platform,
+    ) ||
+      (milestoneContestDetails &&
+        Array.isArray(milestoneContestDetails.milestones) &&
+        milestoneContestDetails.milestones.length > 0))
+  ) {
+    const { data: milestoneSubmissions, error: milestoneSubErr } =
+      await fetchContestSubmissionsAllPages(
+        supabase,
+        contest.id,
+        "id, creator_id, created_at, status, paid, paid_at, earnings, views, platform, other_stats, bonus_paid, bonus_amount, metadata, milestone_bonus_paid",
+        {
+          statusIn: ["pending", "verified", "paid"],
+          order: { column: "created_at", ascending: true },
+        },
+      );
+
+    if (!milestoneSubErr) {
+      const milestoneRecords = (milestoneSubmissions || []).map((s: any) => ({
+        id: s.id,
+        creator_id: s.creator_id,
+        created_at: s.created_at,
+        status: s.status,
+        paid: s.paid,
+        paid_at: s.paid_at,
+        earnings: s.earnings,
+        views: s.views,
+        platform: s.platform,
+        other_stats: s.other_stats,
+        bonus_paid: s.bonus_paid,
+        bonus_amount: s.bonus_amount,
+        metadata: s.metadata,
+        milestone_bonus_paid: s.milestone_bonus_paid,
+      }));
+
+      const budgetSubs: BudgetTileSubmission[] = milestoneRecords.map((s) => ({
+        id: s.id,
+        creator_id: s.creator_id,
+        created_at: s.created_at,
+        status: s.status,
+        paid: s.paid,
+        paid_at: s.paid_at,
+        earnings: s.earnings,
+        views: s.views,
+        platform: s.platform,
+        other_stats: s.other_stats,
+        bonus_paid: s.bonus_paid,
+        bonus_amount: s.bonus_amount,
+      }));
+
+      const tileInput = {
+        contest_type: contest.contest_type,
+        post_contest_status: contest.post_contest_status,
+        max_earnings_per_creator: contest.max_earnings_per_creator,
+        contest_based_details: contest.contest_based_details,
+        platform: contest.platform,
+        bonus_details: contest.bonus_details,
+      };
+      const mode = getBudgetTileMode(contest.post_contest_status);
+      const milestoneBudgetSpentCents =
+        mode === "paid"
+          ? computeBudgetPaidCents(tileInput, budgetSubs)
+          : computeBudgetFilledCents(tileInput, budgetSubs);
+
+      updatedContest = {
+        ...updatedContest,
+        contest_based_details: {
+          ...normalizeContestDetails(updatedContest),
+          milestone_contest: {
+            ...milestoneContestDetails,
+            budget_spent: milestoneBudgetSpentCents,
+          },
+          pool_budget_spent_cents: milestoneBudgetSpentCents,
+        },
+      };
+    } else {
+      console.error(
+        "Failed to calculate milestone budget for contest",
+        contest.id,
+        String((milestoneSubErr as { message?: string })?.message ?? milestoneSubErr),
+      );
+    }
+  }
+
+  if (isDualRewardsContestType(contest.contest_type)) {
+    type DualBudgetSubmissionRow = {
+      id: string;
+      creator_id: string;
+      created_at: string;
+      status?: string | null;
+      paid?: boolean | null;
+      paid_at?: string | null;
+      earnings?: number | null;
+      views?: number | null;
+      platform?: string | null;
+      other_stats?: unknown;
+      bonus_paid?: boolean | null;
+      bonus_amount?: number | null;
+      dual_rewards_payout?: unknown;
+      metadata?: unknown;
+      milestone_bonus_paid?: unknown;
+    };
+    const { data: dualSubmissions, error: dualSubErr } =
+      await fetchContestSubmissionsAllPages<DualBudgetSubmissionRow>(
+        supabase,
+        contest.id,
+        "id, creator_id, created_at, status, paid, paid_at, earnings, views, platform, other_stats, bonus_paid, bonus_amount, dual_rewards_payout, metadata, milestone_bonus_paid",
+        {
+          statusIn: ["pending", "verified", "paid"],
+          order: { column: "created_at", ascending: true },
+        },
+      );
+
+    if (!dualSubErr) {
+      const budgetSubs: BudgetTileSubmission[] = (dualSubmissions || []).map(
+        (s) => ({
+          id: s.id,
+          creator_id: s.creator_id,
+          created_at: s.created_at,
+          status: s.status || undefined,
+          paid: s.paid ?? false,
+          paid_at: s.paid_at ?? null,
+          earnings: s.earnings ?? null,
+          views: s.views ?? 0,
+          platform: s.platform || undefined,
+          other_stats: s.other_stats,
+          bonus_paid: s.bonus_paid ?? false,
+          bonus_amount: s.bonus_amount ?? undefined,
+          dual_rewards_payout: s.dual_rewards_payout,
+          metadata: s.metadata,
+          milestone_bonus_paid: s.milestone_bonus_paid,
+        }),
+      );
+
+      const tileInput = {
+        contest_type: contest.contest_type,
+        post_contest_status: contest.post_contest_status,
+        max_earnings_per_creator: contest.max_earnings_per_creator,
+        contest_based_details: contest.contest_based_details,
+        platform: contest.platform,
+        bonus_details: contest.bonus_details,
+      };
+      const mode = getBudgetTileMode(contest.post_contest_status);
+      const poolSpentCents =
+        mode === "paid"
+          ? computeBudgetPaidCents(tileInput, budgetSubs)
+          : computeBudgetFilledCents(tileInput, budgetSubs);
+
+      updatedContest = {
+        ...updatedContest,
+        contest_based_details: {
+          ...normalizeContestDetails(updatedContest),
+          pool_budget_spent_cents: poolSpentCents,
+        },
+      };
+    } else {
+      console.error(
+        "Failed to calculate dual rewards pool budget for contest",
+        contest.id,
+        String((dualSubErr as { message?: string })?.message ?? dualSubErr),
+      );
+    }
+  }
+
+  if (!updatedContest.status) {
+    updatedContest.status = "unknown";
+  }
+
+  if (!isMilestone) {
+    contestDetailsCache.set(cacheKey, updatedContest);
+  }
+  return updatedContest;
+}
+
+export async function getAdvertiserContestsWithCalculatedBudgets(
+  advertiserId: string,
+  supabaseClient?: SupabaseClient,
+) {
+  const supabase = supabaseClient ?? (await createClient());
+  const contestsData = await fetchContestsWithDetails(supabase, {
+    advertiserId,
+  });
+
+  const contestsWithCalculatedBudgets = await Promise.all(
+    contestsData.map(async (contest) => {
+      const enrichedContest = await enrichContestWithCalculatedBudgets(
+        contest,
+        supabase,
+      );
+      return enrichedContest;
+    }),
+  );
+
+  return contestsWithCalculatedBudgets;
+}
+
+export async function getAllContestsWithCalculatedBudgets(
+  supabaseClient?: SupabaseClient,
+) {
+  const supabase = supabaseClient ?? (await createClient());
+  const contestsData = await fetchContestsWithDetails(supabase, {
+    includeAdvertiserProfile: true,
+  });
+
+  const contestsWithCalculatedBudgets = await Promise.all(
+    contestsData.map(async (contest) => {
+      const enrichedContest = await enrichContestWithCalculatedBudgets(
+        contest,
+        supabase,
+      );
+      return enrichedContest;
+    }),
+  );
+
+  return contestsWithCalculatedBudgets;
+}

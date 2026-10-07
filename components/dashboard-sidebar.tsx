@@ -1,0 +1,932 @@
+"use client";
+
+import { usePathname } from "next/navigation";
+import { useState, useRef, useEffect } from "react";
+import { cn } from "@/lib/utils";
+import {
+  LayoutDashboard,
+  MessageCircle,
+  Trophy,
+  Users,
+  BarChart,
+  Settings,
+  LogOut,
+  Video,
+  DollarSign,
+  CreditCard,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  BarChart3,
+  FileText,
+  Briefcase,
+  Shield,
+  User,
+  Phone,
+  HelpCircle,
+  Award,
+  PlusCircle,
+  Newspaper,
+  Star,
+  Flame,
+} from "lucide-react";
+import Link from "next/link";
+import { ButtonLoadingSpinner } from "@/components/loading/LoadingSpinner";
+
+interface DashboardSidebarProps {
+  userRole?: "advertiser" | "creator" | "admin";
+  collapsed?: boolean;
+  onChatOpen: () => void;
+  onReviewOpen: () => void;
+  mode?: "light" | "dark";
+  supportChatEnabled?: boolean;
+}
+
+export function DashboardSidebar({
+  userRole = "advertiser",
+  onChatOpen,
+  onReviewOpen,
+  collapsed = false,
+  mode,
+  supportChatEnabled = true,
+}: DashboardSidebarProps) {
+  const pathname = usePathname();
+  const [showScrollbar, setShowScrollbar] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const [showChat, setShowChat] = useState(false);
+  const [isOthersDropdownOpen, setIsOthersDropdownOpen] = useState(false);
+  const [navigatingLink, setNavigatingLink] = useState<string | null>(null);
+
+  const handleNavigation = (href: string) => {
+    setNavigatingLink(href);
+  };
+
+  useEffect(() => {
+    setNavigatingLink(null);
+  }, [pathname]);
+  const isDark = mode === "dark";
+
+  // Auto-open Others dropdown if current path matches any dropdown item
+  useEffect(() => {
+    if (userRole === "admin") {
+      const othersDropdownItems = [
+        "/dashboard/admin/manual-entry",
+        "/dashboard/admin/ratings",
+        "/dashboard/admin/others",
+      ];
+      const shouldBeOpen = othersDropdownItems.some((href) =>
+        pathname.startsWith(href),
+      );
+      setIsOthersDropdownOpen(shouldBeOpen);
+    }
+  }, [pathname, userRole]);
+
+  // Check if screen is mobile size
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  // Handle mouse enter on sidebar - show scrollbar immediately
+  const handleMouseEnter = () => {
+    if (!isMobile) {
+      setShowScrollbar(true);
+    }
+  };
+
+  // Handle mouse leave from sidebar - hide scrollbar immediately
+  const handleMouseLeave = () => {
+    if (!isMobile) {
+      setShowScrollbar(false);
+    }
+  };
+
+  const advertiserLinks = [
+    {
+      name: "Getting Started",
+      href: "/dashboard/getting-started",
+      icon: HelpCircle,
+      description: "How it works",
+    },
+    {
+      name: "Campaigns",
+      href: "/dashboard/contests",
+      icon: Trophy,
+      description: "Create/Manage Campaigns",
+    },
+    {
+      name: "Dashboard",
+      href: "/dashboard",
+      icon: LayoutDashboard,
+      description: "Overview & analytics",
+    },
+    {
+      name: "Analytics",
+      href: "/dashboard/analytics",
+      icon: BarChart,
+      description: "Performance insights",
+    },
+    {
+      name: "Billing & Wallet",
+      href: "/dashboard/billing",
+      icon: CreditCard,
+      description: "Balance, transactions & Subscriptions",
+    },
+    {
+      name: "Settings",
+      href: "/dashboard/settings",
+      icon: Settings,
+      description: "Account preferences",
+    },
+  ];
+
+  const adminLinks = [
+    {
+      name: "Admin Dashboard",
+      href: "/dashboard/admin",
+      icon: LayoutDashboard,
+      description: "Admin overview",
+    },
+  
+    {
+      name: "Users",
+      href: "/dashboard/admin/users",
+      icon: Users,
+      description: "Manage all users",
+    },
+    {
+      name: "All Campaigns",
+      href: "/dashboard/admin/contests",
+      icon: Trophy,
+      description: "Manage all contests",
+    },
+    {
+      name: "Campaign Moderation",
+      href: "/dashboard/admin/contest-moderation",
+      icon: Shield,
+      description: "Review & approve campaigns",
+    },
+    {
+      name: "Analytics",
+      href: "/dashboard/admin/analytics",
+      icon: BarChart,
+      description: "Platform performance",
+    },
+    {
+      name: "Leaderboard",
+      href: "/dashboard/admin/leaderboard",
+      icon: Award,
+      description: "Top creators",
+    },
+    {
+      name: "Daily Challenge",
+      href: "/dashboard/daily-challenge",
+      icon: Flame,
+      description: "Competition overview",
+    },
+    {
+      name: "Withdrawal Requests",
+      href: "/dashboard/admin/withdrawals",
+      icon: DollarSign,
+      description: "Manage payout withdrawals",
+    },
+    {
+      name: "Payout Methods",
+      href: "/dashboard/admin/payout-methods",
+      icon: CreditCard,
+      description: "User payout methods & Skydo",
+    },
+    {
+      name: "Affiliate",
+      href: "/dashboard/admin/affiliate",
+      icon: BarChart3,
+      description: "Commissions & credits",
+    },
+    {
+      name: "Blogs",
+      href: "/dashboard/admin/blogs",
+      icon: Newspaper,
+      description: "Create and manage blog posts",
+    },
+    {
+      name: "Support",
+      href: "/dashboard/admin/support",
+      icon: HelpCircle,
+      description: "Queries & contacts",
+    },
+  ];
+
+  const othersDropdownItems = [
+    {
+      name: "Manual Entry",
+      href: "/dashboard/admin/manual-entry",
+      icon: PlusCircle,
+      description: "Credit coins or cash to users",
+    },
+    {
+      name: "Rating",
+      href: "/dashboard/admin/ratings",
+      icon: Star,
+      description: "View user reviews and ratings",
+    },
+  ];
+
+  const creatorLinks = [
+    {
+      name: "Getting Started",
+      href: "/dashboard/getting-started",
+      icon: HelpCircle,
+      description: "How it works",
+    },
+    {
+      name: "Campaigns",
+      href: "/dashboard/opportunities",
+      icon: Trophy,
+      description: "Available contests",
+    },
+    {
+      name: "Dashboard",
+      href: "/dashboard",
+      icon: LayoutDashboard,
+      description: "Your overview",
+    },
+    {
+      name: "My Submissions",
+      href: "/dashboard/submissions",
+      icon: Video,
+      description: "Content submissions",
+    },
+
+    {
+      name: "Leaderboard",
+      href: "/dashboard/leaderboard",
+      icon: Award,
+      description: "Top creators",
+    },
+    {
+      name: "Daily Challenge",
+      href: "/dashboard/daily-challenge",
+      icon: Flame,
+      description: "Daily competition engine",
+    },
+    {
+      name: "Wallet",
+      href: "/dashboard/earnings",
+      icon: DollarSign,
+      description: "Earnings & Transactions",
+    },
+    {
+      name: "Settings",
+      href: "/dashboard/settings",
+      icon: Settings,
+      description: "Account preferences",
+    },
+  ];
+
+  const links =
+    userRole === "advertiser"
+      ? advertiserLinks
+      : userRole === "admin"
+        ? adminLinks
+        : creatorLinks;
+
+  // Ensure scroll container is properly sized and can scroll
+  useEffect(() => {
+    if (scrollContainerRef.current) {
+      const container = scrollContainerRef.current;
+      // Force browser to recalculate scroll height
+      const checkScroll = () => {
+        if (container.scrollHeight > container.clientHeight) {
+          // Content overflows, ensure scrolling is enabled
+          container.style.overflowY = "auto";
+        }
+      };
+
+      // Check immediately and after a short delay
+      checkScroll();
+      const timeout = setTimeout(checkScroll, 100);
+
+      // Also check on resize
+      window.addEventListener("resize", checkScroll);
+
+      return () => {
+        clearTimeout(timeout);
+        window.removeEventListener("resize", checkScroll);
+      };
+    }
+  }, [links, userRole, collapsed]);
+
+  return (
+    <div
+      className="dashboard-sidebar flex h-full w-full flex-col min-h-0 overflow-hidden"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* Navigation Links - Full Height */}
+      <div
+        ref={scrollContainerRef}
+        className={cn(
+          "flex-1 overflow-y-auto overflow-x-hidden transition-all duration-300",
+          "scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100",
+          isMobile || showScrollbar
+            ? "sidebar-scrollbar"
+            : "sidebar-scrollbar-hidden",
+          "sm:hover:scrollbar-thumb-gray-400",
+        )}
+        style={{
+          minHeight: 0,
+          height: 0,
+          flex: "1 1 0%",
+          WebkitOverflowScrolling: "touch",
+          overscrollBehavior: "contain",
+          boxSizing: "border-box",
+        }}
+      >
+        {/* Removed Getting Started link for admin */}
+        <div className="p-4 pb-4">
+          {!collapsed && (
+            <h3
+              className="px-3 py-2 text-xs font-semibold uppercase tracking-wider"
+              style={{ color: "hsl(var(--muted-foreground))" }}
+            >
+              Navigation
+            </h3>
+          )}
+          <nav className={cn("space-y-2", collapsed && "space-y-3")}>
+            {(() => {
+              const isDark = mode === "dark";
+              const activeBg = isDark
+                ? "rgba(127, 57, 236, 0.15)"
+                : "#7F39EC14";
+              const activeBorder = isDark
+                ? "rgba(127, 57, 236, 0.45)"
+                : "hsl(var(--primary) / 0.3)";
+              const activeText = isDark ? "#ffffff" : "#4A00BE";
+              const hoverShadow = "0 1px 2px 0 rgba(0, 0, 0, 0.05)";
+
+              return (
+                <>
+                  {links.map((link) => {
+                    const isActive = pathname === link.href;
+                    return (
+                      <Link
+                        key={link.href}
+                        href={link.href}
+                        onClick={() => handleNavigation(link.href)}
+                        className={cn(
+                          "group relative flex items-center gap-3 rounded-xl transition-all duration-200",
+                          "border border-transparent",
+                          collapsed ? "justify-center px-2 py-3" : "px-3 py-3",
+                        )}
+                        style={{
+                          backgroundColor: isActive ? activeBg : "transparent",
+                          borderColor: isActive ? activeBorder : "transparent",
+                          color: isActive
+                            ? activeText
+                            : "hsl(var(--foreground))",
+                          // boxShadow: isActive
+                          //   ? "0 4px 6px -1px hsl(var(--primary) / 0.25)"
+                          //   : "none",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!isActive) {
+                            e.currentTarget.style.borderColor = activeBorder;
+                            e.currentTarget.style.backgroundColor = activeBg;
+                            e.currentTarget.style.boxShadow = hoverShadow;
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!isActive) {
+                            e.currentTarget.style.borderColor = "transparent";
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                            e.currentTarget.style.boxShadow = "none";
+                          }
+                        }}
+                        title={collapsed ? link.name : undefined}
+                      >
+                        <div
+                          className={cn(
+                            "flex items-center justify-center rounded-lg transition-colors",
+                            collapsed ? "w-16 h-12" : "w-10 h-10",
+                          )}
+                          style={{
+                            color: isActive
+                              ? isDark
+                                ? "#C9A7FF"
+                                : "#4A00BE"
+                              : "hsl(var(--primary))",
+                          }}
+                        >
+                           <link.icon
+                            className={cn(collapsed ? "h-6 w-6" : "h-5 w-5")}
+                          />
+                        </div>
+                        {!collapsed && (
+                          <>
+                            <div className="flex-1 min-w-0">
+                              <div
+                                className="font-semibold text-sm"
+                                style={{
+                                  color: isActive
+                                    ? isDark
+                                      ? "#ffffff"
+                                      : "#4A00BE"
+                                    : "hsl(var(--foreground))",
+                                }}
+                              >
+                                {link.name}
+                              </div>
+                              <div
+                                className="text-xs truncate transition-colors"
+                                style={{
+                                  color: isActive
+                                    ? isDark
+                                      ? "rgba(255,255,255,0.8)"
+                                      : "#4A00BE"
+                                    : "hsl(var(--muted-foreground))",
+                                }}
+                              >
+                                {link.description}
+                              </div>
+                            </div>
+                            {navigatingLink === link.href ? (
+                            <ButtonLoadingSpinner />
+                          ) : (
+                            <ChevronRight
+                              className={cn(
+                                "h-4 w-4 transition-all duration-200",
+                                isActive && "translate-x-0.5",
+                              )}
+                              style={{
+                                color: isActive
+                                  ? isDark
+                                    ? "#C9A7FF"
+                                    : "#4A00BE"
+                                  : "hsl(var(--muted-foreground))",
+                              }}
+                            />
+                          )}
+                          </>
+                        )}
+                      </Link>
+                    );
+                  })}
+
+                  {/* Others with Dropdown for Admin */}
+                  {userRole === "admin" && (
+                    <div className="space-y-1 pb-2">
+                      <div className="relative">
+                        <button
+                          onClick={() =>
+                            setIsOthersDropdownOpen(!isOthersDropdownOpen)
+                          }
+                          className={cn(
+                            "group relative flex items-center gap-3 rounded-xl transition-all duration-200 w-full",
+                            "border border-transparent",
+                            collapsed
+                              ? "justify-center px-2 py-3"
+                              : "justify-start px-3 py-3",
+                          )}
+                          style={{
+                            backgroundColor:
+                              isOthersDropdownOpen ||
+                              pathname === "/dashboard/admin/manual-entry" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/manual-entry",
+                              ) ||
+                              pathname === "/dashboard/admin/ratings" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/ratings",
+                              ) ||
+                              pathname === "/dashboard/admin/others" ||
+                              pathname.startsWith("/dashboard/admin/others")
+                                ? activeBg
+                                : "transparent",
+                            borderColor:
+                              isOthersDropdownOpen ||
+                              pathname === "/dashboard/admin/manual-entry" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/manual-entry",
+                              ) ||
+                              pathname === "/dashboard/admin/ratings" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/ratings",
+                              ) ||
+                              pathname === "/dashboard/admin/others" ||
+                              pathname.startsWith("/dashboard/admin/others")
+                                ? activeBorder
+                                : "transparent",
+                            color:
+                              isOthersDropdownOpen ||
+                              pathname === "/dashboard/admin/manual-entry" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/manual-entry",
+                              ) ||
+                              pathname === "/dashboard/admin/ratings" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/ratings",
+                              ) ||
+                              pathname === "/dashboard/admin/others" ||
+                              pathname.startsWith("/dashboard/admin/others")
+                                ? activeText
+                                : "hsl(var(--foreground))",
+                          }}
+                          onMouseEnter={(e) => {
+                            const isActive =
+                              isOthersDropdownOpen ||
+                              pathname === "/dashboard/admin/manual-entry" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/manual-entry",
+                              ) ||
+                              pathname === "/dashboard/admin/ratings" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/ratings",
+                              ) ||
+                              pathname === "/dashboard/admin/others" ||
+                              pathname.startsWith("/dashboard/admin/others");
+                            if (!isActive) {
+                              e.currentTarget.style.borderColor = activeBorder;
+                              e.currentTarget.style.backgroundColor = activeBg;
+                              e.currentTarget.style.boxShadow = hoverShadow;
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            const isActive =
+                              isOthersDropdownOpen ||
+                              pathname === "/dashboard/admin/manual-entry" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/manual-entry",
+                              ) ||
+                              pathname === "/dashboard/admin/ratings" ||
+                              pathname.startsWith(
+                                "/dashboard/admin/ratings",
+                              ) ||
+                              pathname === "/dashboard/admin/others" ||
+                              pathname.startsWith("/dashboard/admin/others");
+                            if (!isActive) {
+                              e.currentTarget.style.borderColor = "transparent";
+                              e.currentTarget.style.backgroundColor =
+                                "transparent";
+                              e.currentTarget.style.boxShadow = "none";
+                            }
+                          }}
+                          title={collapsed ? "Others" : undefined}
+                        >
+                          <div
+                            className={cn(
+                              "flex items-center justify-center rounded-lg transition-colors",
+                              collapsed ? "w-16 h-12" : "w-10 h-10",
+                            )}
+                            style={{
+                              color:
+                                isOthersDropdownOpen ||
+                                pathname === "/dashboard/admin/manual-entry" ||
+                                pathname.startsWith(
+                                  "/dashboard/admin/manual-entry",
+                                ) ||
+                                pathname === "/dashboard/admin/ratings" ||
+                                pathname.startsWith(
+                                  "/dashboard/admin/ratings",
+                                ) ||
+                                pathname === "/dashboard/admin/others" ||
+                                pathname.startsWith("/dashboard/admin/others")
+                                  ? isDark
+                                    ? "#C9A7FF"
+                                    : "#4A00BE"
+                                  : "hsl(var(--primary))",
+                            }}
+                          >
+                            <FileText
+                              className={cn(collapsed ? "h-6 w-6" : "h-5 w-5")}
+                            />
+                          </div>
+                          {!collapsed && (
+                            <>
+                              <div className="flex-1 min-w-0 text-left">
+                                <div
+                                  className="font-semibold text-sm text-left"
+                                  style={{
+                                    color:
+                                      isOthersDropdownOpen ||
+                                      pathname ===
+                                        "/dashboard/admin/manual-entry" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/manual-entry",
+                                      ) ||
+                                      pathname === "/dashboard/admin/ratings" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/ratings",
+                                      ) ||
+                                      pathname === "/dashboard/admin/others" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/others",
+                                      )
+                                        ? isDark
+                                          ? "#ffffff"
+                                          : "#4A00BE"
+                                        : "hsl(var(--foreground))",
+                                  }}
+                                >
+                                  Others
+                                </div>
+                                <div
+                                  className="text-xs truncate transition-colors text-left"
+                                  style={{
+                                    color:
+                                      isOthersDropdownOpen ||
+                                      pathname ===
+                                        "/dashboard/admin/manual-entry" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/manual-entry",
+                                      ) ||
+                                      pathname === "/dashboard/admin/ratings" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/ratings",
+                                      ) ||
+                                      pathname === "/dashboard/admin/others" ||
+                                      pathname.startsWith(
+                                        "/dashboard/admin/others",
+                                      )
+                                        ? isDark
+                                          ? "rgba(255,255,255,0.8)"
+                                          : "#4A00BE"
+                                        : "hsl(var(--muted-foreground))",
+                                  }}
+                                >
+                                  Other admin functions
+                                </div>
+                              </div>
+                              {isOthersDropdownOpen ? (
+                                <ChevronUp className="h-4 w-4 transition-all duration-200" />
+                              ) : (
+                                <ChevronDown className="h-4 w-4 transition-all duration-200" />
+                              )}
+                            </>
+                          )}
+                        </button>
+
+                        {/* Manual Entry nested inside Others */}
+                        {isOthersDropdownOpen && !collapsed && (
+                          <div className="ml-4 mt-1 space-y-1 pl-4">
+                            {othersDropdownItems.map((item) => {
+                              const isItemActive = pathname === item.href;
+                              return (
+                                <Link
+                                  key={item.href}
+                                  href={item.href}
+                                  onClick={() => handleNavigation(item.href)}
+                                  className={cn(
+                                    "group relative flex items-center gap-3 rounded-xl transition-all duration-200",
+                                    "border border-transparent",
+                                    "px-3 py-2",
+                                  )}
+                                  style={{
+                                    backgroundColor: isItemActive
+                                      ? activeBg
+                                      : "transparent",
+                                    borderColor: isItemActive
+                                      ? activeBorder
+                                      : "transparent",
+                                    color: isItemActive
+                                      ? activeText
+                                      : "hsl(var(--foreground))",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!isItemActive) {
+                                      e.currentTarget.style.borderColor =
+                                        activeBorder;
+                                      e.currentTarget.style.backgroundColor =
+                                        activeBg;
+                                      e.currentTarget.style.boxShadow =
+                                        hoverShadow;
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (!isItemActive) {
+                                      e.currentTarget.style.borderColor =
+                                        "transparent";
+                                      e.currentTarget.style.backgroundColor =
+                                        "transparent";
+                                      e.currentTarget.style.boxShadow = "none";
+                                    }
+                                  }}
+                                >
+                                  <div
+                                    className="flex items-center justify-center rounded-lg transition-colors w-8 h-8"
+                                    style={{
+                                      color: isItemActive
+                                        ? isDark
+                                          ? "#C9A7FF"
+                                          : "#4A00BE"
+                                        : "hsl(var(--primary))",
+                                    }}
+                                  >
+                                    <item.icon className="h-4 w-4" />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div
+                                      className="font-semibold text-sm"
+                                      style={{
+                                        color: isItemActive
+                                          ? isDark
+                                            ? "#ffffff"
+                                            : "#4A00BE"
+                                          : "hsl(var(--foreground))",
+                                      }}
+                                    >
+                                      {item.name}
+                                    </div>
+                                    <div
+                                      className="text-xs truncate transition-colors"
+                                      style={{
+                                        color: isItemActive
+                                          ? isDark
+                                            ? "rgba(255,255,255,0.8)"
+                                            : "#4A00BE"
+                                          : "hsl(var(--muted-foreground))",
+                                      }}
+                                    >
+                                      {item.description}
+                                    </div>
+                                  </div>
+                                  {navigatingLink === item.href ? (
+                                    <ButtonLoadingSpinner />
+                                  ) : (
+                                    isItemActive && (
+                                      <ChevronRight
+                                        className="h-4 w-4 transition-all duration-200 translate-x-0.5"
+                                        style={{
+                                          color: isDark ? "#C9A7FF" : "#4A00BE",
+                                        }}
+                                      />
+                                    )
+                                  )}
+                                </Link>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </nav>
+        </div>
+        <div className="px-4 pb-8 mb-4">
+          {/* Sidebar Content: hide chat widget for admin */}
+          {userRole !== "admin" && (
+            <div
+              className={cn(
+                "chat-card p-4 rounded-2xl shadow-lg",
+                isDark
+                  ? "border border-purple-500 bg-[rgba(127,57,236,0.10)] shadow-purple-900/30"
+                  : "border border-purple-500 bg-purple-100 shadow-purple-200",
+              )}
+            >
+              {!collapsed ? (
+                <div className="flex flex-col gap-3">
+                  <p
+                    className={cn(
+                      "text-md text-center font-medium",
+                      isDark ? "text-white" : "text-purple-800",
+                    )}
+                  >
+                    We're here to help
+                  </p>
+
+                  <div className="flex py-2 justify-center">
+                    <div className="rounded-full bg-purple-600 p-2">
+                      <Phone size={23} className="text-white" />
+                    </div>
+                  </div>
+                  <button
+                    onClick={supportChatEnabled ? onChatOpen : undefined}
+                    disabled={!supportChatEnabled}
+                    title={
+                      supportChatEnabled
+                        ? "Chat with support"
+                        : "Support chat is unavailable for your account"
+                    }
+                    className={cn(
+                      "w-full rounded-xl py-2 transition text-white",
+                      supportChatEnabled
+                        ? "bg-purple-600 hover:bg-purple-700"
+                        : "bg-gray-400 cursor-not-allowed opacity-70",
+                    )}
+                  >
+                    {supportChatEnabled ? "Chat with Us" : "Chat unavailable"}
+                  </button>
+
+                  {/* Show Book a Call only for advertisers */}
+                  {userRole === "advertiser" && (
+                    <a
+                      href="https://calendly.com/guptavishesh2/30min"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Book a free 30-min call with our founder"
+                      className={cn(
+                        "block w-full rounded-xl text-white py-2 text-center transition",
+                        isDark
+                          ? "bg-purple-700 hover:bg-purple-600"
+                          : "bg-black hover:bg-gray-800",
+                      )}
+                    >
+                      Book a Call with the Founder
+                    </a>
+                  )}
+
+                  {/* Review Button - Show for all user roles except admin */}
+                  {(userRole === "advertiser" || userRole === "creator") && (
+                    <button
+                      onClick={onReviewOpen}
+                      className={cn(
+                        "flex items-center justify-center gap-2 w-full rounded-xl py-2 text-center transition",
+                        isDark
+                          ? "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white"
+                          : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white",
+                      )}
+                    >
+                      {/* <Star className="h-4 w-4" /> */}
+                      Leave a Review
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-3">
+                  <button
+                    onClick={supportChatEnabled ? onChatOpen : undefined}
+                    disabled={!supportChatEnabled}
+                    title={
+                      supportChatEnabled
+                        ? "Chat with support"
+                        : "Support chat unavailable"
+                    }
+                    className={cn(
+                      "rounded-full text-white w-10 h-10 flex items-center justify-center",
+                      supportChatEnabled
+                        ? isDark
+                          ? "bg-purple-700 hover:bg-purple-600"
+                          : "bg-[#7F39EC] hover:bg-purple-700"
+                        : "bg-gray-400 cursor-not-allowed opacity-70",
+                    )}
+                  >
+                    <MessageCircle size={18} />
+                  </button>
+                  {/* Show Book a Call only for advertisers */}
+                  {userRole === "advertiser" && (
+                    <div
+                      className={cn(
+                        "rounded-full w-10 h-10 flex items-center justify-center",
+                        isDark ? "bg-purple-700" : "bg-[#7F39EC]",
+                      )}
+                    >
+                      <a
+                        href="https://calendly.com/guptavishesh2/30min"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Book a Call with the Founder"
+                      >
+                        <Phone size={18} className="text-white" />
+                      </a>
+                    </div>
+                  )}
+
+                  {/* Review Button - Show for all user roles except admin */}
+                  {(userRole === "advertiser" || userRole === "creator") && (
+                    <button
+                      onClick={onReviewOpen}
+                      className={cn(
+                        "rounded-full w-10 h-10 flex items-center justify-center",
+                        isDark
+                          ? "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
+                          : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700",
+                      )}
+                    >
+                      <Star size={18} className="text-white" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {/* Spacer to ensure scroll reaches bottom */}
+        <div style={{ height: "80px", minHeight: "80px", flexShrink: 0 }} />
+      </div>
+    </div>
+  );
+}

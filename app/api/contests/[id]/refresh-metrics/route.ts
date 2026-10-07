@@ -1,0 +1,673 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/utils/supabase/server";
+import { revalidateLeaderboardCache } from "@/lib/leaderboard-cache";
+import { createClient as createAdminSupabaseClient } from "@supabase/supabase-js";
+import { refreshContestStats } from "@/lib/contest-stats";
+import { persistContestBudgetSpent } from "@/lib/persist-contest-budget-spent";
+import {
+  METRICS_REFRESH_COOLDOWN_MS_OPPORTUNITIES,
+  METRICS_REFRESH_COOLDOWN_MS_BRAND,
+  METRICS_REFRESH_COOLDOWN_MS_ADMIN,
+  isPlatformAllowAnyAuthenticated,
+} from "@/lib/constants";
+import { verifyAdminAccess } from "@/utils/admin-auth";
+import {
+  isMetricsQueueEnabled,
+  getMissingQueueEnv,
+  enqueueMetricsRefreshJob,
+} from "@/lib/queue/metrics-refresh-queue";
+import { ensureTwitterMetricsRunForEnqueue } from "@/lib/twitter-metrics-refresh-runs";
+import {
+  isInstagramInsightsQueueEnabled,
+} from "@/lib/queue/instagram-insights-queue";
+import {
+  isQStashEnabled,
+  triggerProcessMetricsQueue,
+  triggerProcessInstagramInsightsQueue,
+  triggerProcessTikTokMetricsQueue,
+} from "@/lib/qstash";
+import {
+  isTikTokMetricsQueueEnabled,
+} from "@/lib/queue/tiktok-metrics-queue";
+import { isYouTubeMetricsQueueEnabled } from "@/lib/queue/youtube-metrics-queue";
+import {
+  parseRequestedRefreshPlatforms,
+  partitionRefreshPlatformsByQueueAvailability,
+  resolveLiveContestVideoPlatforms,
+  resolveMetricsRefreshPlatformQueue,
+  youtubeScopeForMetricsRefresh,
+} from "@/lib/multi-platform-metrics-refresh";
+import { startMultiPlatformMetricsChain } from "@/lib/queue/multi-platform-metrics-chain";
+import { filterPlatformsWithEligibleLiveSubmissions } from "@/lib/eligible-live-submissions-for-refresh";
+import type { YouTubeRefreshScope } from "@/lib/queue/youtube-metrics-queue";
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const refreshMetricsStartMs = Date.now();
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const resolvedParams = await params;
+    const contestId = resolvedParams.id;
+    const now = new Date();
+
+    // Get contest details including last metrics update time and Twitter campaign type (for queue)
+    const { data: contest, error: contestError } = await supabase
+      .from("contests")
+      .select(
+        "id, title, platform, advertiser_id, last_metrics_updated, post_contest_status, contest_based_details",
+      )
+      .eq("id", contestId)
+      .single();
+
+    if (contestError || !contest) {
+      return NextResponse.json({ error: "Contest not found" }, { status: 404 });
+    }
+
+    // Hard lock: once in review, verification complete, or payouts processed, do not refresh
+    if (
+      contest.post_contest_status === "in_review" ||
+      contest.post_contest_status === "verification_complete" ||
+      contest.post_contest_status === "payouts_processed"
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Metrics are locked after contest review begins. No further refresh allowed.",
+        },
+        { status: 400 },
+      );
+    }
+
+    // Access: platforms in PLATFORMS_ALLOW_ANY_AUTHENTICATED = any authenticated user; others (e.g. Twitter) = owner, admin, or participant only.
+    const { isAdmin } = await verifyAdminAccess();
+    const isOwner = contest.advertiser_id === user?.id;
+    const platform = (contest.platform ?? "").toLowerCase();
+    if (!isPlatformAllowAnyAuthenticated(contest.platform)) {
+      if (!isOwner && !isAdmin) {
+        const supabaseAdmin = createAdminSupabaseClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        );
+        const { data: participant } = await supabaseAdmin
+          .from("twitter_campaign_participants")
+          .select("creator_id")
+          .eq("contest_id", contestId)
+          .eq("creator_id", user!.id)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (!participant) {
+          return NextResponse.json(
+            {
+              error:
+                "Please participate in the campaign before refreshing ....",
+            },
+            { status: 403 },
+          );
+        }
+      }
+    }
+    // Cooldown: creators (not owner, not admin) use longer cooldown; owner/admin use shorter.
+    const isOpportunitiesRefresh = !isAdmin && !isOwner;
+
+    // Determine cooldown period based on user type
+    const cooldownMs = isOpportunitiesRefresh
+      ? METRICS_REFRESH_COOLDOWN_MS_OPPORTUNITIES // 2 hours for creators
+      : isAdmin
+        ? METRICS_REFRESH_COOLDOWN_MS_ADMIN // 1 minute for admins
+        : METRICS_REFRESH_COOLDOWN_MS_BRAND; // 3 minutes for brands/advertisers
+
+    // Database-based rate limiting using last_metrics_updated
+    if (contest.last_metrics_updated) {
+      const lastUpdate = new Date(contest.last_metrics_updated);
+      const timeSinceLastUpdate = now.getTime() - lastUpdate.getTime();
+
+      if (timeSinceLastUpdate < cooldownMs) {
+        const remainingMs = cooldownMs - timeSinceLastUpdate;
+        const remainingMinutes = Math.ceil(remainingMs / 1000 / 60);
+        const userType = isOpportunitiesRefresh
+          ? "creators"
+          : isAdmin
+            ? "admins"
+            : "brands/owners";
+        return NextResponse.json(
+          {
+            error: `Metrics were updated ${Math.floor(
+              timeSinceLastUpdate / 1000 / 60,
+            )} minutes ago. Please wait ${remainingMinutes} more minutes before refreshing again.`,
+            nextRefreshAvailable: new Date(
+              lastUpdate.getTime() + cooldownMs,
+            ).toISOString(),
+            userType,
+          },
+          { status: 429 },
+        );
+      }
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const requestedPlatforms = parseRequestedRefreshPlatforms(
+      (body as { platforms?: unknown })?.platforms,
+    );
+
+    const platformLower = (contest.platform ?? "").toLowerCase();
+    const isTwitter =
+      platformLower === "twitter" ||
+      platformLower === "x" ||
+      platformLower.includes("twitter");
+
+    const liveVideoPlatforms = resolveLiveContestVideoPlatforms(contest.platform);
+    const videoQueueTargets = resolveMetricsRefreshPlatformQueue({
+      allowedPlatforms: liveVideoPlatforms,
+      requestedPlatforms,
+    });
+
+    // Determine which cron job to call based on platform (sync fallback path)
+    let cronEndpoint: string;
+    let cronName: string;
+
+    if (isTwitter) {
+      cronEndpoint = `/api/contests/${contestId}/twitter-refresh-tweets`;
+      cronName = "Twitter Metrics";
+    } else if (videoQueueTargets.length === 1) {
+      switch (videoQueueTargets[0]) {
+        case "instagram":
+          cronEndpoint = "/api/cron/update-instagram-insights";
+          cronName = "Instagram Insights";
+          break;
+        case "youtube":
+          cronEndpoint = "/api/cron/update-youtube-metrics";
+          cronName = "YouTube Metrics";
+          break;
+        case "tiktok":
+          cronEndpoint = "/api/cron/update-tiktok-metrics";
+          cronName = "TikTok Metrics";
+          break;
+        default:
+          return NextResponse.json(
+            {
+              error: `Metrics refresh not supported for platform: ${contest.platform}`,
+            },
+            { status: 400 },
+          );
+      }
+    } else if (videoQueueTargets.length > 1) {
+      // Hybrid: sync fallback not supported; require Redis queues below.
+      cronEndpoint = "";
+      cronName = "Multi-platform Metrics";
+    } else if (liveVideoPlatforms.length === 0 && !isTwitter) {
+      return NextResponse.json(
+        {
+          error: `Metrics refresh not supported for platform: ${contest.platform}`,
+        },
+        { status: 400 },
+      );
+    } else if (
+      requestedPlatforms.length > 0 &&
+      videoQueueTargets.length === 0
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "None of the requested platforms are available on this contest.",
+        },
+        { status: 400 },
+      );
+    } else {
+      // Legacy exact match for odd single-platform strings
+      switch (contest.platform?.toLowerCase()) {
+        case "instagram":
+          cronEndpoint = "/api/cron/update-instagram-insights";
+          cronName = "Instagram Insights";
+          break;
+        case "youtube":
+          cronEndpoint = "/api/cron/update-youtube-metrics";
+          cronName = "YouTube Metrics";
+          break;
+        case "tiktok":
+          cronEndpoint = "/api/cron/update-tiktok-metrics";
+          cronName = "TikTok Metrics";
+          break;
+        default:
+          return NextResponse.json(
+            {
+              error: `Metrics refresh not supported for platform: ${contest.platform}`,
+            },
+            { status: 400 },
+          );
+      }
+    }
+
+    // Twitter: use Upstash Redis; video platforms: per-platform Redis queues + optional chain
+    const queueEnabled = isMetricsQueueEnabled();
+    const instagramQueueEnabled = isInstagramInsightsQueueEnabled();
+    const tiktokQueueEnabled = isTikTokMetricsQueueEnabled();
+    const youtubeQueueEnabled = isYouTubeMetricsQueueEnabled();
+    const useQueue = isTwitter && queueEnabled;
+
+    const {
+      available: queuedVideoPlatforms,
+      unavailable: unqueuedVideoPlatforms,
+    } = partitionRefreshPlatformsByQueueAvailability(videoQueueTargets, {
+      youtube: youtubeQueueEnabled,
+      instagram: instagramQueueEnabled,
+      tiktok: tiktokQueueEnabled,
+    });
+
+    if (videoQueueTargets.length > 1 && unqueuedVideoPlatforms.length > 0) {
+      return NextResponse.json(
+        {
+          error: `Multi-platform metrics refresh is not fully configured. Missing queues: ${unqueuedVideoPlatforms.join(", ")}.`,
+        },
+        { status: 503 },
+      );
+    }
+
+    if (isTwitter) {
+      const why = queueEnabled
+        ? "using queue (background refresh)"
+        : `queue not configured (missing: ${getMissingQueueEnv().join(
+            ", ",
+          )}), using sync`;
+      console.log(
+        `[metrics-refresh-queue] Twitter refresh for contest ${contestId}: ${why}`,
+      );
+    }
+
+    // Multi / single video platform via Redis + QStash (sequential chain when 2+)
+    if (!isTwitter && queuedVideoPlatforms.length > 0) {
+      const protocol = request.headers.get("x-forwarded-proto") || "http";
+      const host = request.headers.get("host");
+      const baseUrl = host
+        ? `${protocol}://${host}`
+        : process.env.NEXT_PUBLIC_APP_URL
+          ? `https://${process.env.NEXT_PUBLIC_APP_URL}`
+          : "";
+      const cookieHeader = request.headers.get("cookie");
+
+      const scopeRaw = (body as { scope?: string })?.scope;
+      const parsedScope =
+        scopeRaw === "basic" ||
+        scopeRaw === "core" ||
+        scopeRaw === "traffic" ||
+        scopeRaw === "demographics" ||
+        scopeRaw === "all" ||
+        scopeRaw === "all_standard"
+          ? (scopeRaw as YouTubeRefreshScope)
+          : null;
+      // Brand + creators always use YouTube basic (same as single-platform).
+      // Admin multi-platform still defaults to `all` unless a scope is sent.
+      const youtubeScope = youtubeScopeForMetricsRefresh({
+        campaignPlatformCount: liveVideoPlatforms.length,
+        forceBasic: !isAdmin,
+        requestedScope: isAdmin ? parsedScope : null,
+      });
+
+      // Skip platforms with no eligible submissions so UI/chain don't show empty progress.
+      const supabaseAdminForEligibility = createAdminSupabaseClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      );
+      const platformsWithSubs = await filterPlatformsWithEligibleLiveSubmissions(
+        supabaseAdminForEligibility,
+        contestId,
+        queuedVideoPlatforms,
+      );
+      if (platformsWithSubs.length === 0) {
+        return NextResponse.json(
+          {
+            error:
+              "No eligible submissions to refresh for the selected platform(s).",
+          },
+          { status: 400 },
+        );
+      }
+
+      const chainResult = await startMultiPlatformMetricsChain({
+        baseUrl,
+        contestId,
+        platforms: platformsWithSubs,
+        metricsTarget: "submissions",
+        scope: youtubeScope,
+        cookieHeader,
+      });
+
+      if (chainResult.error) {
+        return NextResponse.json(
+          { error: chainResult.error },
+          { status: chainResult.status ?? 500 },
+        );
+      }
+
+      const runs = chainResult.runs;
+      const labels = runs.map((r) => r.platformLabel).join(" → ");
+      const anyAlreadyActive = runs.some((r) => r.alreadyActive);
+      const orderNote = chainResult.chain
+        ? " Queued in order (YouTube → Instagram → TikTok)."
+        : "";
+
+      return NextResponse.json({
+        success: true,
+        queued: true,
+        chain: chainResult.chain,
+        message: anyAlreadyActive
+          ? `Refresh already in progress for ${labels}.`
+          : `${labels} refresh started.${orderNote} Metrics will update shortly.`,
+        contestId,
+        contestTitle: contest.title,
+        platform: contest.platform,
+        platforms: platformsWithSubs,
+        runs,
+        runId: runs[0]?.runId,
+        nextRefreshAvailable: new Date(
+          now.getTime() + cooldownMs,
+        ).toISOString(),
+      });
+    }
+
+    if (useQueue) {
+      const protocol = request.headers.get("x-forwarded-proto") || "http";
+      const host = request.headers.get("host");
+      const baseUrl = host
+        ? `${protocol}://${host}`
+        : process.env.NEXT_PUBLIC_APP_URL
+          ? `https://${process.env.NEXT_PUBLIC_APP_URL}`
+          : "";
+
+      const platform = (contest?.platform ?? "").toString().toLowerCase();
+      const isTwitterPlatform = platform === "twitter" || platform === "x";
+      const campaignType =
+        (
+          contest as {
+            contest_based_details?: {
+              twitter_campaign?: { campaign_type?: string };
+            };
+          }
+        )?.contest_based_details?.twitter_campaign?.campaign_type ?? "";
+      const isRaidCampaign =
+        isTwitterPlatform &&
+        typeof campaignType === "string" &&
+        campaignType.toLowerCase().trim() === "raid";
+
+      // Raid → enqueue job for fetch-raid-engagements (batched by participant). Awareness → enqueue job for twitter-refresh-tweets.
+      const supabaseAdmin = createAdminSupabaseClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      );
+      const { count: participantCountResult } = await supabaseAdmin
+        .from("twitter_campaign_participants")
+        .select("*", { count: "exact", head: true })
+        .eq("contest_id", contestId)
+        .eq("is_active", true);
+      const participantCount = participantCountResult ?? 0;
+      const BATCH_SIZE = 5;
+      const totalBatches = Math.max(
+        1,
+        Math.ceil(participantCount / BATCH_SIZE),
+      );
+
+      const runEnsure = await ensureTwitterMetricsRunForEnqueue(supabaseAdmin, {
+        contestId,
+        isRaid: isRaidCampaign,
+        totalBatches,
+        totalParticipants: participantCount,
+        creatorScopeId: null,
+      });
+      if (!runEnsure.ok) {
+        return NextResponse.json(
+          { error: runEnsure.error },
+          { status: 500 }
+        );
+      }
+      if (runEnsure.alreadyActive) {
+        const processUrl = `${baseUrl}/api/cron/process-metrics-queue`;
+        const doFetchActive = () =>
+          fetch(processUrl, {
+            method: "POST",
+            headers: {
+              ...(process.env.CRON_SECRET
+                ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
+                : {}),
+            },
+          }).catch((e) =>
+            console.warn(
+              "[refresh-metrics] Trigger process-metrics-queue (active run) failed:",
+              e
+            )
+          );
+        if (isQStashEnabled()) {
+          triggerProcessMetricsQueue(baseUrl).then((res) => {
+            if (res?.error) doFetchActive();
+          }).catch(() => doFetchActive());
+        } else {
+          doFetchActive();
+        }
+        return NextResponse.json({
+          success: true,
+          queued: true,
+          message: "Refresh already in progress.",
+          contestId,
+          runId: runEnsure.runId,
+          nextRefreshAvailable: new Date(
+            now.getTime() + cooldownMs
+          ).toISOString(),
+        });
+      }
+
+      let job: Parameters<typeof enqueueMetricsRefreshJob>[0];
+      if (isRaidCampaign) {
+        job = {
+          contestId,
+          isRaid: true,
+          batchIndex: 0,
+          totalBatches,
+          runId: runEnsure.runId,
+        };
+      } else {
+        job = {
+          contestId,
+          isRaid: false,
+          batchIndex: 0,
+          totalBatches,
+          runId: runEnsure.runId,
+        };
+      }
+
+      console.log(
+        `[metrics-refresh-queue] Enqueueing job for contest ${contestId}`,
+        job,
+      );
+      const enqueueResult = await enqueueMetricsRefreshJob(job);
+      if (enqueueResult.error) {
+        console.error(
+          `[metrics-refresh-queue] Enqueue failed for contest ${contestId}:`,
+          enqueueResult.error,
+        );
+        await supabaseAdmin
+          .from("twitter_metrics_refresh_runs")
+          .update({
+            status: "failed",
+            error_message: enqueueResult.error.slice(0, 2000),
+            finished_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", runEnsure.runId);
+        return NextResponse.json(
+          {
+            error: `Failed to start metrics refresh: ${enqueueResult.error}`,
+          },
+          { status: 500 },
+        );
+      }
+
+      const enqueueElapsedMs = Date.now() - refreshMetricsStartMs;
+      console.log(
+        `[refresh-metrics] contestId=${contestId} enqueued in ${enqueueElapsedMs}ms - ${cronName} - Source: ${isOpportunitiesRefresh ? "Opportunities" : "Owner"}`,
+      );
+      // Trigger processor via QStash (event-driven) or fallback to direct POST (e.g. localhost)
+      const processUrl = `${baseUrl}/api/cron/process-metrics-queue`;
+      const doFetch = () =>
+        fetch(processUrl, {
+          method: "POST",
+          headers: {
+            ...(process.env.CRON_SECRET
+              ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
+              : {}),
+          },
+        }).catch((e) =>
+          console.warn(
+            "[metrics-refresh-queue] Trigger process-metrics-queue failed:",
+            e,
+          ),
+        );
+      if (isQStashEnabled()) {
+        triggerProcessMetricsQueue(baseUrl)
+          .then((res) => {
+            if (res?.error) {
+              doFetch();
+            } else if (res?.messageId) {
+              console.log(
+                "[refresh-metrics] QStash trigger sent messageId=",
+                res.messageId,
+              );
+            }
+          })
+          .catch(() => doFetch());
+      } else {
+        doFetch();
+      }
+
+      // Leaderboard cache is revalidated when twitter-refresh-tweets / fetch-raid-engagements
+      // finish (including after queued batches), not when the job is only enqueued.
+      return NextResponse.json({
+        success: true,
+        queued: true,
+        message: "Refresh started in background. Metrics will update shortly.",
+        contestId,
+        contestTitle: contest.title,
+        platform: contest.platform,
+        runId: runEnsure.runId,
+        nextRefreshAvailable: new Date(
+          now.getTime() + cooldownMs,
+        ).toISOString(),
+        timeSinceLastUpdate: contest.last_metrics_updated
+          ? Math.floor(
+              (now.getTime() -
+                new Date(contest.last_metrics_updated).getTime()) /
+                1000 /
+                60,
+            )
+          : null,
+        messageId: enqueueResult.messageId,
+      });
+    }
+
+    // Sync path: call the appropriate cron job or endpoint
+    const baseUrl = request.headers.get("host");
+    const protocol = request.headers.get("x-forwarded-proto") || "http";
+
+    let cronUrl: string;
+    if (isTwitter) {
+      cronUrl = `${protocol}://${baseUrl}${cronEndpoint}`;
+    } else {
+      cronUrl = `${protocol}://${baseUrl}${cronEndpoint}?contestId=${contestId}`;
+    }
+
+    console.log(
+      `[refresh-metrics] contestId=${contestId} starting sync refresh - ${cronName} - Source: ${
+        isOpportunitiesRefresh ? "Opportunities" : "Owner"
+      }`,
+    );
+
+    const cookieHeader = request.headers.get("cookie");
+    const cronResponse = await fetch(cronUrl, {
+      method: isTwitter ? "POST" : "GET",
+      headers: {
+        ...(isTwitter
+          ? {}
+          : { Authorization: `Bearer ${process.env.CRON_SECRET}` }),
+        "Content-Type": "application/json",
+        ...(isTwitter ? {} : { "X-Contest-Id": contestId }),
+        ...(isTwitter && cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+    });
+
+    if (!cronResponse.ok) {
+      const errorText = await cronResponse.text();
+      console.error(`Cron job failed for contest ${contestId}:`, errorText);
+      return NextResponse.json(
+        {
+          error: `Failed to refresh ${cronName.toLowerCase()}`,
+        },
+        { status: 500 },
+      );
+    }
+
+    const cronResult = await cronResponse.json();
+    const currentTime = new Date().toISOString();
+
+    const supabaseAdmin = createAdminSupabaseClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    );
+
+    const { data: updateData, error: updateError } = await supabaseAdmin
+      .from("contests")
+      .update({ last_metrics_updated: currentTime })
+      .eq("id", contestId)
+      .select();
+
+    if (updateError) {
+      console.error(
+        `Failed to update last_metrics_updated for contest ${contestId}:`,
+        updateError,
+      );
+    } else {
+      console.log(
+        `Successfully updated last_metrics_updated for contest ${contestId} to ${currentTime}`,
+      );
+    }
+
+    await refreshContestStats(contestId);
+    await persistContestBudgetSpent(contestId);
+
+    const syncElapsedMs = Date.now() - refreshMetricsStartMs;
+    console.log(
+      `[refresh-metrics] contestId=${contestId} sync refresh completed in ${syncElapsedMs}ms`,
+    );
+
+    revalidateLeaderboardCache(contestId);
+    return NextResponse.json({
+      success: true,
+      message: `${cronName} refreshed successfully`,
+      contestId,
+      contestTitle: contest.title,
+      platform: contest.platform,
+      nextRefreshAvailable: new Date(now.getTime() + cooldownMs).toISOString(),
+      timeSinceLastUpdate: contest.last_metrics_updated
+        ? Math.floor(
+            (now.getTime() - new Date(contest.last_metrics_updated).getTime()) /
+              1000 /
+              60,
+          )
+        : null,
+      lastMetricsUpdated: currentTime,
+      cronResult,
+    });
+  } catch (error: any) {
+    const errorElapsedMs = Date.now() - refreshMetricsStartMs;
+    console.error(`[refresh-metrics] Error after ${errorElapsedMs}ms:`, error);
+    return NextResponse.json(
+      { error: `Refresh failed: ${error.message}` },
+      { status: 500 },
+    );
+  }
+}

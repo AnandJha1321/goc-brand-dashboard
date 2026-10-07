@@ -1,0 +1,962 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import Link from "next/link";
+import {
+  Trophy,
+  DollarSign,
+  Plus,
+  Video,
+  User,
+  Building,
+  HelpCircle,
+  Eye,
+  Coins,
+  Loader2,
+  Gift,
+} from "lucide-react";
+import { formatLocalDateTime, cn } from "@/lib/utils";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useClientAuth } from "@/hooks/use-client-auth";
+import { createClient } from "@/utils/supabase/client";
+import { formatCurrencyFromCents } from "@/lib/currency-utils";
+import { getPoolBudgetCentsFromDetails } from "@/lib/contest-type";
+import { useIsMobile } from "@/hooks/use-mobile";
+
+import { ContestCreationModal } from "@/components/ContestCreationModal";
+import { useContestCreation } from "@/hooks/use-contest-creation";
+import {
+  PageLoadingSpinner,
+  ButtonLoadingSpinner,
+} from "@/components/loading/LoadingSpinner";
+import GettingStartedModal from "@/components/GettingStartedModal";
+import { ReferralEarnModal } from "@/components/ReferralEarnModal";
+
+function DashboardPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const supabase = createClient();
+  const {
+    user,
+    isLoading: isAuthLoading,
+    isAuthenticated,
+  } = useClientAuth({
+    redirectTo: "/auth/signin",
+  });
+  const isMobile = useIsMobile();
+  const [profile, setProfile] = useState<any>(null);
+  const [recentContests, setRecentContests] = useState<any[]>([]);
+  const [isFetchingData, setIsFetchingData] = useState(true);
+  const [userCoins, setUserCoins] = useState(0);
+  const [isMounted, setIsMounted] = useState(false);
+  const [hasProcessedSuccess, setHasProcessedSuccess] = useState(false);
+  const [referralCode, setReferralCode] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
+
+  const [showModal, setShowModal] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const { handleCreateContest } = useContestCreation(user?.id);
+  const [showPopup, setShowPopup] = useState(false);
+  const [isReferralModalOpen, setIsReferralModalOpen] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [viewButtonsLoading, setViewButtonsLoading] = useState<
+    Record<string, boolean>
+  >({});
+
+  const handleNavigation = () => {
+    setIsNavigating(true);
+  };
+  const [mode, setMode] = useState<"light" | "dark">("light");
+
+  // Read mode from data attribute
+  useEffect(() => {
+    const checkMode = () => {
+      const modeElement = document.querySelector("[data-mode]");
+      if (modeElement) {
+        const currentMode = modeElement.getAttribute("data-mode") as
+          | "light"
+          | "dark";
+        if (currentMode) {
+          setMode(currentMode);
+        }
+      }
+    };
+
+    checkMode();
+
+    // Watch for changes in the data attribute
+    const observer = new MutationObserver(checkMode);
+    const targetNode = document.querySelector("[data-mode]");
+    if (targetNode) {
+      observer.observe(targetNode, {
+        attributes: true,
+        attributeFilter: ["data-mode"],
+      });
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
+  // Handle checkout success - with protection against infinite loops
+  useEffect(() => {
+    const success = searchParams.get("success");
+    const sessionId = searchParams.get("session_id");
+
+    if (success === "true" && sessionId && user && !hasProcessedSuccess) {
+      console.log(
+        "🎉 Payment successful in dashboard, refreshing profile data...",
+      );
+      setHasProcessedSuccess(true);
+
+      // Clear URL parameters to prevent refresh loops
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, "", newUrl);
+
+      // Refresh profile data after a short delay to allow webhook processing
+      const refreshProfileData = async () => {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          // Refetch the profile data to get updated subscription info
+          if (user.user_type === "advertiser") {
+            const { data: advertiserProfile } = await supabase
+              .from("advertiser_profiles")
+              .select("*, subscription_info")
+              .eq("id", user.id)
+              .single();
+
+            if (advertiserProfile) {
+              setProfile(advertiserProfile);
+              console.log("✅ Profile data refreshed after checkout");
+            }
+          }
+        } catch (error) {
+          console.error("Error refreshing profile data:", error);
+        }
+      };
+
+      refreshProfileData();
+    }
+  }, [searchParams, user, supabase, hasProcessedSuccess]);
+
+  // Effect to auto-open WelcomePopup ONLY once after login
+  useEffect(() => {
+    if (
+      profile &&
+      "company_name" in profile && // ✅ advertiser check
+      (!profile?.total_contests_run || profile.total_contests_run === 0) // ✅ no contests
+    ) {
+      // ✅ Check if user already saw the popup
+      const hasSeenPopup = localStorage.getItem("gettingStartedPopupShown");
+
+      if (!hasSeenPopup) {
+        setShowPopup(true); // ✅ Open popup first time
+        localStorage.setItem("gettingStartedPopupShown", "true"); // ✅ Mark as seen
+      }
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function fetchData() {
+      if (!user) {
+        console.warn("DashboardPage: Fetch attempt skipped, no user found.");
+        if (isMounted) setIsFetchingData(false);
+        return;
+      }
+
+      if (isMounted) setIsFetchingData(true);
+
+      try {
+        const { data: userData, error: userError } = await supabase
+          .from("users")
+          .select("user_type, coins, email, username, full_name, referral_code")
+          .eq("id", user.id)
+          .single();
+
+        if (!isMounted) return;
+
+        if (userError) {
+          console.error(
+            "Error fetching user data:",
+            userError.message,
+            userError.details,
+          );
+          if (isMounted) setIsFetchingData(false);
+          return;
+        }
+
+        const userType = userData?.user_type;
+        setUserCoins(userData?.coins || 0);
+
+        setUsername(userData?.username || null);
+        setReferralCode(userData?.referral_code || userData?.username || null);
+
+        if (userType === "advertiser") {
+          // Fetch advertiser profile
+          const { data: advertiserProfile, error: profileError } =
+            await supabase
+              .from("advertiser_profiles")
+              .select("*, subscription_info")
+              .eq("id", user.id)
+              .single();
+
+          if (!isMounted) return;
+          if (profileError) {
+            console.error(
+              "Error fetching advertiser profile:",
+              profileError.message,
+              profileError.details,
+            );
+          }
+
+          // Fetch contests data for accurate calculations
+          const { data: contests, error: contestsError } = await supabase
+            .from("contests")
+            .select("*")
+            .eq("advertiser_id", user.id);
+
+          if (!isMounted) return;
+          if (contestsError) {
+            console.error("Error fetching contests:", contestsError);
+          }
+
+          // Fetch submissions for views calculation
+          const { data: submissions, error: submissionsError } = await supabase
+            .from("submissions")
+            .select("*, contests!inner(*)")
+            .eq("contests.advertiser_id", user.id);
+
+          if (!isMounted) return;
+          if (submissionsError) {
+            console.error("Error fetching submissions:", submissionsError);
+          }
+
+          // Calculate actual statistics
+          const totalContests = contests?.length || 0;
+          const totalViews =
+            submissions?.reduce((sum, sub) => sum + (sub.views || 0), 0) || 0;
+          const totalSpent =
+            contests?.reduce((sum, contest) => {
+              if (
+                contest.contest_type === "leaderboard" &&
+                contest.contest_based_details?.leaderboard_contest?.total_prize
+              ) {
+                return (
+                  sum +
+                  contest.contest_based_details.leaderboard_contest.total_prize
+                );
+              } else if (
+                contest.contest_type === "cpm" &&
+                contest.contest_based_details?.cpm_contest?.total_budget
+              ) {
+                return (
+                  sum + contest.contest_based_details.cpm_contest.total_budget
+                );
+              } else if (contest.contest_type === "milestone") {
+                return (
+                  sum +
+                  getPoolBudgetCentsFromDetails(
+                    "milestone",
+                    contest.contest_based_details,
+                  )
+                );
+              } else if (contest.contest_type === "dual_rewards") {
+                return (
+                  sum +
+                  getPoolBudgetCentsFromDetails(
+                    "dual_rewards",
+                    contest.contest_based_details,
+                  )
+                );
+              }
+              return sum;
+            }, 0) || 0;
+
+          // Update profile with calculated values
+          const updatedProfile = {
+            ...advertiserProfile,
+            total_contests_run: totalContests,
+            total_money_spent: totalSpent,
+            total_views: totalViews,
+          };
+
+          setProfile(updatedProfile);
+
+          // Get recent contests for display
+          const recentContests =
+            contests
+              ?.slice(0, 3)
+              ?.sort(
+                (a, b) =>
+                  new Date(b.created_at).getTime() -
+                  new Date(a.created_at).getTime(),
+              ) || [];
+
+          setRecentContests(recentContests);
+        } else if (userType === "creator") {
+          const { data: creatorProfile, error: profileError } = await supabase
+            .from("creator_profiles")
+            .select("*")
+            .eq("id", user.id)
+            .single();
+
+          if (!isMounted) return;
+          if (profileError) {
+            console.error(
+              "Error fetching creator profile:",
+              profileError.message,
+              profileError.details,
+            );
+          } else {
+            setProfile(creatorProfile);
+          }
+
+          const { data: recentRows, error: recentError } = await supabase.rpc(
+            "creator_dashboard_recent_activity",
+          );
+
+          if (!isMounted) return;
+          if (recentError) {
+            console.error(
+              "Error fetching creator recent activity:",
+              recentError,
+            );
+            setRecentContests([]);
+          } else if (recentRows?.length) {
+            setRecentContests(recentRows as any[]);
+          } else {
+            setRecentContests([]);
+          }
+        } else if (userType === "admin") {
+          // Redirect admin users to their dedicated admin dashboard
+          router.push("/dashboard/admin");
+          return;
+        }
+      } catch (error) {
+        console.error("Error fetching dashboard data:", error);
+      } finally {
+        if (isMounted) {
+          setIsFetchingData(false);
+        }
+      }
+    }
+
+    if (isAuthenticated && !isAuthLoading) {
+      fetchData();
+    } else if (!isAuthLoading && !isAuthenticated) {
+      setIsFetchingData(false);
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user, isAuthLoading, isAuthenticated, supabase, router]);
+
+  // Guidelines check moved to opportunities page for creators
+
+  if (isAuthLoading || isFetchingData) {
+    return (
+      <div className="flex items-center justify-center h-[76vh]">
+        <PageLoadingSpinner mode="light" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !user) {
+    return (
+      <div className="text-center p-8">
+        Please sign in to view the dashboard.
+      </div>
+    );
+  }
+
+  const handleCreateContestClick = async () => {
+    setLoading(true);
+    const shouldShowModal = await handleCreateContest();
+    if (shouldShowModal) {
+      setShowModal(true);
+      setLoading(false);
+    }
+  };
+
+  const isAdvertiser = profile && "company_name" in profile;
+  const isDark = mode === "dark";
+
+  return (
+    <div className="space-y-8 bg-background text-foreground transition-colors duration-300">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <h2
+          className={cn(
+            "w-full pl-2 text-2xl font-bold tracking-tight sm:w-auto text-left md:text-3xl",
+            isDark ? "text-white" : "text-slate-900",
+          )}
+        >
+          Dashboard
+        </h2>
+        <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+          {/* Referral CTA — survey button disabled per REFERRAL_PROGRAM.md */}
+          {/* {!isAdvertiser && !isSurveyCompleted && (
+            <button onClick={() => setIsSurveyModalOpen(true)} ...>
+              Fill survey and earn upto $5
+            </button>
+          )} */}
+          <button
+            onClick={() => setIsReferralModalOpen(true)}
+            className={cn(
+              "flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-md font-medium text-white sm:w-auto",
+              isDark ? "bg-[#5F2BB1]" : "bg-[#4A00BE]",
+            )}
+          >
+            <Gift className="h-4 w-4" />
+            {isAdvertiser ? "Refer & earn 30% commission" : "Refer and earn upto $100"}
+        
+          </button>
+          {isAdvertiser && (
+            <button
+              onClick={handleCreateContestClick}
+              disabled={loading}
+              className={cn(
+                "flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-md font-medium text-white sm:w-auto",
+                isDark ? "bg-[#5F2BB1]" : "bg-[#4A00BE]",
+              )}
+            >
+              {loading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Create Campaign
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        {isAdvertiser ? (
+          <>
+            {/* Total Spent Card - Red/Pink */}
+            <div
+              className={cn(
+                "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+                isDark ? "bg-[#170337]" : "bg-white",
+              )}
+            >
+              <CardContent className="p-4">
+                <div className="flex justify-between">
+                  <div
+                    className={cn(
+                      "flex-1 space-y-2",
+                      isDark ? "text-white" : "text-black",
+                    )}
+                  >
+                    <p className="text-lg font-medium">Total Spent</p>
+                    <p className="text-xl font-bold ">
+                      {formatCurrencyFromCents(profile?.total_money_spent || 0)}
+                    </p>
+                    <p className="text-md mt-0.5">Money spent on campaigns</p>
+                  </div>
+                  <div
+                    className={cn(
+                      "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                      isDark
+                        ? "bg-[#FFFFFF36] text-white"
+                        : "bg-[#D8C3FF] text-[#4A00BE]",
+                    )}
+                  >
+                    <DollarSign className="w-5 h-5" />
+                  </div>
+                </div>
+              </CardContent>
+            </div>
+
+            {/* Total Contests Card - Blue */}
+            <div
+              className={cn(
+                "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+                isDark ? "bg-[#170337]" : "bg-white",
+              )}
+            >
+              <CardContent className="p-4">
+                <div className="flex justify-between">
+                  <div
+                    className={cn(
+                      "flex-1 space-y-2",
+                      isDark ? "text-white" : "text-black",
+                    )}
+                  >
+                    <p className="text-lg font-medium">Total Campaigns</p>
+                    <p className="text-xl font-bold">
+                      {profile?.total_contests_run || 0}
+                    </p>
+                    <p className="text-md mt-0.5">Campaigns created</p>
+                  </div>
+                  <div
+                    className={cn(
+                      "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                      isDark
+                        ? "bg-[#FFFFFF36] text-white"
+                        : "bg-[#D8C3FF] text-[#4A00BE]",
+                    )}
+                  >
+                    <Trophy className="h-5 w-5" />
+                  </div>
+                </div>
+              </CardContent>
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              className={cn(
+                "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+                isDark ? "bg-[#170337]" : "bg-white",
+              )}
+            >
+              <CardContent className="p-4">
+                <div className="flex justify-between">
+                  <div
+                    className={cn(
+                      "flex-1 space-y-2",
+                      isDark ? "text-white" : "text-black",
+                    )}
+                  >
+                    <p className="text-lg font-medium">Total Earnings</p>
+                    <p className="text-xl font-bold">
+                      {formatCurrencyFromCents(profile?.total_money_won || 0)}
+                    </p>
+                    <p className="text-md  mt-0.5">
+                      Money earned from campaigns
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                      isDark
+                        ? "bg-[#FFFFFF36] text-white"
+                        : "bg-[#D8C3FF] text-[#4A00BE]",
+                    )}
+                  >
+                    <DollarSign className="h-6 w-6" />
+                  </div>
+                </div>
+              </CardContent>
+            </div>
+            {/* <Card className="bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 border-green-200 dark:border-green-700/50 hover:shadow-lg transition-all duration-300">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-white dark:bg-slate-800 rounded-lg shadow-sm">
+                    <DollarSign className="h-5 w-5 text-green-600 dark:text-green-400" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-xs font-medium text-green-800 dark:text-green-300 uppercase tracking-wide">
+                      Total Earnings
+                    </p>
+                    <p className="text-lg font-bold text-green-900 dark:text-green-100">
+                      {formatCurrencyFromCents(profile?.total_money_won || 0)}
+                    </p>
+                    <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                      Money earned from campaigns
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card> */}
+
+            {/* Contests Won Card - Yellow/Gold */}
+
+            <div
+              className={cn(
+                "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+                isDark ? "bg-[#170337]" : "bg-white",
+              )}
+            >
+              <CardContent className="p-4">
+                <div className="flex justify-between">
+                  <div
+                    className={cn(
+                      "flex-1 space-y-2",
+                      isDark ? "text-white" : "text-black",
+                    )}
+                  >
+                    <p className="text-lg font-medium">Campaigns Won</p>
+                    <p className="text-xl font-bold">
+                      {profile?.total_contests_won || 0}
+                    </p>
+                    <p className="text-md  mt-0.5">
+                      Out of {profile?.total_contests_participated || 0}{" "}
+                      participated
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                      isDark
+                        ? "bg-[#FFFFFF36] text-white"
+                        : "bg-[#D8C3FF] text-[#4A00BE]",
+                    )}
+                  >
+                    <Trophy className="h-6 w-6" />
+                  </div>
+                </div>
+              </CardContent>
+            </div>
+            {/* <Card className="bg-gradient-to-br from-yellow-50 to-amber-50 dark:from-yellow-900/20 dark:to-amber-900/20 border-yellow-200 dark:border-yellow-700/50 hover:shadow-lg transition-all duration-300">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-white dark:bg-slate-800 rounded-lg shadow-sm">
+                    <Trophy className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-xs font-medium text-yellow-800 dark:text-yellow-300 uppercase tracking-wide">
+                      Campaigns Won
+                    </p>
+                    <p className="text-lg font-bold text-yellow-900 dark:text-yellow-100">
+                      {profile?.total_contests_won || 0}
+                    </p>
+                    <p className="text-xs text-yellow-700 dark:text-yellow-400 mt-0.5">
+                      Out of {profile?.total_contests_participated || 0}{" "}
+                      participated
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card> */}
+          </>
+        )}
+
+        {/* Total Views Card - Purple */}
+        <div
+          className={cn(
+            "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+            isDark ? "bg-[#170337]" : "bg-white",
+          )}
+        >
+          <CardContent className="p-4">
+            <div className="flex justify-between">
+              <div
+                className={cn(
+                  "flex-1 space-y-2",
+                  isDark ? "text-white" : "text-black",
+                )}
+              >
+                <p className="text-lg font-medium">Total Views</p>
+                <p className="text-xl font-bold">
+                  {(profile?.total_views || 0).toLocaleString()}
+                </p>
+                <p className="text-md  mt-0.5">
+                  {isAdvertiser
+                    ? "Views on campaign content"
+                    : "Views on your content"}
+                </p>
+              </div>
+              <div
+                className={cn(
+                  "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                  isDark
+                    ? "bg-[#FFFFFF36] text-white"
+                    : "bg-[#D8C3FF] text-[#4A00BE]",
+                )}
+              >
+                <Eye className="h-6 w-6" />
+              </div>
+            </div>
+          </CardContent>
+        </div>
+
+        {/* Available Coins Card - Orange */}
+        <div
+          className={cn(
+            "rounded-xl shadow-[0px_5px_20px_0px_#0000000D] p-2",
+            isDark ? "bg-[#170337]" : "bg-white",
+          )}
+        >
+          <CardContent className="p-4">
+            <div className="flex justify-between">
+              <div
+                className={cn(
+                  "flex-1 space-y-2",
+                  isDark ? "text-white" : "text-black",
+                )}
+              >
+                <p className="text-lg font-medium">Available Coins</p>
+                <p className="text-lg font-bold">{userCoins}</p>
+                <p className="text-md mt-0.5">Coins to redeem or use</p>
+              </div>
+              <div
+                className={cn(
+                  "w-10 h-10 flex items-center justify-center rounded-full  mb-4",
+                  isDark
+                    ? "bg-[#FFFFFF36] text-white"
+                    : "bg-[#D8C3FF] text-[#4A00BE]",
+                )}
+              >
+                <Coins className="w-5 h-5" />
+              </div>
+            </div>
+          </CardContent>
+        </div>
+      </div>
+
+      {/* Getting Started Section - Only show for advertisers with no contests */}
+      {isAdvertiser &&
+        (!profile?.total_contests_run || profile.total_contests_run === 0) && (
+          <div
+            className={cn(
+              "mb-6  rounded-xl",
+              isDark
+                ? "bg-[#170337] border border-[#170337]"
+                : "bg-white border border-gray-300",
+            )}
+          >
+            <CardContent className="p-4 sm:p-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+                <div className="flex items-start sm:items-center space-x-4">
+                  <div
+                    className={cn(
+                      "p-3 rounded-full flex-shrink-0",
+                      isDark
+                        ? "bg-[#FFFFFF36] text-white"
+                        : "bg-purple-100 dark:bg-purple-900 text-purple-600 dark:text-purple-400",
+                    )}
+                  >
+                    <HelpCircle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3
+                      className={cn(
+                        "text-base sm:text-lg font-semibold mb-1",
+                        isDark ? "text-white" : "text-gray-900 dark:text-white",
+                      )}
+                    >
+                      New to Game Of Creators?
+                    </h3>
+                    <p
+                      className={cn(
+                        "text-sm sm:text-base",
+                        isDark
+                          ? "text-white"
+                          : "text-gray-600 dark:text-gray-300",
+                      )}
+                    >
+                      Learn about our two campaign types: Leaderboard and CPM
+                      campaigns
+                    </p>
+                  </div>
+                </div>
+                {/* <Link href="/dashboard/getting-started">
+                  <Button className="bg-purple-600 hover:bg-purple-700 text-white">
+                    <HelpCircle className="w-4 h-4 mr-2" />
+                    Get Started
+                  </Button>
+                </Link> */}
+                <Button
+                  className={cn(
+                    "text-white flex items-center justify-center sm:justify-start px-4 py-2",
+                    isDark
+                      ? "bg-[#5F2BB1] text-white"
+                      : "bg-purple-600 hover:bg-purple-700",
+                  )}
+                  onClick={() => setShowPopup(true)}
+                >
+                  {isNavigating ? (
+                    <ButtonLoadingSpinner />
+                  ) : (
+                    <HelpCircle className="w-4 h-4" />
+                  )}
+                  Get Started
+                </Button>
+                <GettingStartedModal
+                  open={showPopup}
+                  onClose={() => setShowPopup(false)}
+                />
+              </div>
+            </CardContent>
+          </div>
+        )}
+
+      <div
+        className={cn(
+          "grid gap-6",
+          isAdvertiser ? "md:grid-cols-2" : "md:grid-cols-1",
+        )}
+      >
+        <div
+          className={cn(
+            "rounded-xl shadow-md flex flex-col",
+            isAdvertiser ? "min-h-[300px]" : "min-h-[350px]",
+            isDark ? "bg-[#210B43]" : "bg-white",
+          )}
+        >
+          <CardHeader>
+            <CardTitle className={cn(isDark ? "text-white" : "text-slate-900")}>
+              Recent Activity
+            </CardTitle>
+            <CardDescription
+              className={cn(
+                "text-md",
+                isDark ? "text-[#808080]" : "text-slate-600",
+              )}
+            >
+              {isAdvertiser
+                ? "Your recent campaigns"
+                : "Campaigns you've participated in recently"}
+            </CardDescription>
+          </CardHeader>
+          <div className="flex-1 overflow-y-auto px-4 sm:px-6 pb-4">
+            {recentContests && recentContests.length > 0 ? (
+              <div className="space-y-4">
+                {recentContests.map((contest) => (
+                  <div
+                    key={contest.id}
+                    className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-lg border border-[#D1B7F9]"
+                  >
+                    <div className="flex items-center gap-4 flex-1 min-w-0">
+                      {/* <div className="rounded-full bg-primary/10 p-3 flex-shrink-0">
+                        
+                        <Trophy className="h-5 w-5 text-primary" />
+                      </div> */}
+
+                      <div className="rounded-full flex-shrink-0 h-8 w-8 md:w-14 md:h-14 overflow-hidden">
+                        <img
+                          src={contest.thumbnail_url}
+                          alt="Thumbnail"
+                          className="w-full h-full object-cover rounded-full"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm sm:text-base font-semibold text-foreground break-words">
+                          {contest.title}
+                        </p>
+                        <p className="text-xs sm:text-sm text-muted-foreground mt-1 break-words">
+                          {contest.platform} •{" "}
+                          {isAdvertiser
+                            ? formatLocalDateTime(contest.created_at, {
+                                year: "numeric",
+                                month: "short",
+                                day: "numeric",
+                              })
+                            : contest.last_submission_at
+                              ? `Last submission ${formatLocalDateTime(
+                                  contest.last_submission_at,
+                                )}`
+                              : "Last submission —"}
+                        </p>
+                      </div>
+                    </div>
+                    <Link
+                      href={
+                        isAdvertiser
+                          ? `/dashboard/contests/${contest.id}`
+                          : `/dashboard/opportunities/${contest.id}`
+                      }
+                      className="block w-full sm:w-auto"
+                    >
+                      <button
+                        className="w-full px-4 py-2 rounded-xl bg-[#6C43D0] text-white flex items-center justify-center gap-2"
+                        onClick={() => {
+                          setViewButtonsLoading((prev) => ({
+                            ...prev,
+                            [contest.id]: true,
+                          }));
+                          setTimeout(() => {
+                            window.location.href = isAdvertiser
+                              ? `/dashboard/contests/${contest.id}`
+                              : `/dashboard/opportunities/${contest.id}`;
+                          }, 100);
+                        }}
+                        disabled={viewButtonsLoading[contest.id]}
+                      >
+                        {viewButtonsLoading[contest.id] ? (
+                          <ButtonLoadingSpinner />
+                        ) : null}
+                        View
+                      </button>
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-md text-muted-foreground text-center">
+                  {isAdvertiser
+                    ? "No campaigns created yet"
+                    : "No campaign activity yet"}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {isAdvertiser && (
+          <div
+            className={cn(
+              "rounded-xl shadow-md",
+              isDark ? "bg-[#210B43]" : "bg-white",
+            )}
+          >
+            <CardHeader>
+              <CardTitle
+                className={cn(isDark ? "text-white" : "text-slate-900")}
+              >
+                Analytics Overview
+              </CardTitle>
+              <CardDescription
+                className={cn(isDark ? "text-gray-300" : "text-slate-600")}
+              >
+                Performance insights for your{" "}
+                {isAdvertiser ? "campaigns" : "content"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div
+                className={cn(
+                  "flex h-[270px] items-center justify-center border rounded-xl",
+                  isDark
+                    ? "bg-[#170337] border-[#170337]"
+                    : "bg-[#7F39EC26] border-[#D1B7F9]",
+                )}
+              >
+                <p
+                  className={cn(
+                    "text-lg font-semibold",
+                    isDark ? "text-white" : "text-black",
+                  )}
+                >
+                  Detailed analytics available soon
+                </p>
+              </div>
+            </CardContent>
+          </div>
+        )}
+      </div>
+      <ContestCreationModal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        userId={user?.id || ""}
+      />
+      <ReferralEarnModal
+        isOpen={isReferralModalOpen}
+        onClose={() => setIsReferralModalOpen(false)}
+        audience={isAdvertiser ? "advertiser" : "creator"}
+        referralCode={referralCode}
+        username={username}
+      />
+    </div>
+  );
+}
+
+export default DashboardPage;

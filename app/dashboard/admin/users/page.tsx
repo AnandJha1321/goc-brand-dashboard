@@ -1,0 +1,7748 @@
+"use client";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { PaginationControls } from "@/components/ui/pagination-controls";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { EnhancedTabs } from "@/components/ui/enhancedTabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertTriangle,
+  Settings,
+  X,
+  Check,
+  ChevronDown,
+  Filter,
+  Plus,
+  Trash2,
+  Clock,
+  Map as MapIcon,
+  List,
+  Bell,
+  Mail,
+  Send,
+  Loader2,
+  Layers,
+  RefreshCw,
+} from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { scheduleClientDelivery } from "@/hooks/useAdminScheduledNotificationDelivery";
+import {
+  SendNotificationModal,
+  type NotificationSelectionState,
+} from "./SendNotificationModal";
+import { AdminNotificationsView } from "./AdminNotificationsView";
+import { AttachEmailCampaignModal } from "./AttachEmailCampaignModal";
+import {
+  AddLeadsToCampaignModal,
+  type AddLeadsModalVariant,
+} from "./AddLeadsToCampaignModal";
+import {
+  clearEmailLeadSelectModeStorage,
+  readEmailLeadPreselectedUserIds,
+} from "@/lib/admin-email/enter-lead-select-mode";
+import type { RecipientUserRow } from "@/lib/admin-notifications/types";
+import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  getAllSubscriptionPlans,
+  getSubscriptionPlanById,
+} from "@/lib/subscription-utils-client";
+import REGIONS_AND_COUNTRIES_DATA from "@/data/regions-and-countries.json";
+import { getCreatorTrustScoreFromMetrics } from "@/lib/trust-score";
+import { formatTrustScorePct } from "@/lib/creator-profile-stats";
+import { SupportChatToggle } from "@/components/admin/SupportChatToggle";
+
+const UsersMap = dynamic(
+  () => import("./UsersMap").then((m) => ({ default: m.UsersMap })),
+  { ssr: false },
+);
+
+const AdminEmailView = dynamic(
+  () => import("./AdminEmailView").then((m) => ({ default: m.AdminEmailView })),
+  {
+    ssr: false,
+    loading: () => null,
+  },
+);
+
+type AdvertiserProfile = {
+  id: string;
+  company_name?: string | null;
+  website_url?: string | null;
+  total_money_spent?: number | null;
+  total_contests_run?: number | null;
+  available_deposit_balance?: number | null;
+  withdrawable_balance?: number | null;
+  subscription_info?: any | null;
+};
+
+type CreatorProfile = {
+  id: string;
+  youtube_account?: any | null;
+  instagram_account?: any | null;
+  tiktok_account?: any | null;
+  twitter_account?: any | null;
+  total_contests_participated?: number | null;
+  total_contests_won?: number | null;
+  total_views?: number | null;
+  total_money_won?: number | null;
+  withdrawable_balance?: number | null;
+  total_submissions_made?: number | null;
+  total_submissions_won?: number | null;
+  date_of_birth?: string | null;
+  gender?: string | null;
+  country?: string | null;
+  state?: string | null;
+  city?: string | null;
+  address?: string | null;
+  languages?: string[] | any | null;
+  categories?: any | null;
+  subcategories?: any | null;
+  interests?: string[] | any | null;
+  trust_score_metrics?: unknown | null;
+  avg_quality_score?: number | null;
+  best_quality_score?: number | null;
+  quality_score_sum?: number | null;
+  scored_verified_count?: number | null;
+  quality_score_counts?: any | null;
+};
+
+type User = {
+  id: string;
+  email: string;
+  username?: string | null;
+  full_name: string;
+  // Basic user type and status
+  user_type: string;
+  is_active: boolean;
+  support_chat_enabled?: boolean | null;
+  coins: number;
+  created_at: string;
+  updated_at: string;
+  profile_picture_url?: string | null;
+  referral_code?: string | null;
+  referred_by?: string | null;
+  advertisers_referred?: number | null;
+  creators_referred?: number | null;
+  total_lifetime_coins_earned?: number | null;
+  email_confirmed_at?: string | null;
+  ip_address?: string | null;
+  affiliate_earnings?: number | null;
+  other_earnings?: number | null;
+  // Registration metadata captured during signup (JSONB in DB)
+  registration_info?: Record<string, any> | null;
+  // Geo data (lat/lon) - stored as flat { lat, lon, country, ... } or nested { geo_data: { lat, lon, ... } }
+  geo_data?:
+    | {
+        lat?: number;
+        lon?: number;
+        country?: string;
+        city?: string;
+        state?: string;
+        [k: string]: any;
+      }
+    | {
+        geo_data?: { lat?: number; lon?: number; [k: string]: any };
+        [k: string]: any;
+      }
+    | null;
+  // Supabase may return this as an array or a single object depending on the relationship
+  advertiser_profiles?: AdvertiserProfile[] | AdvertiserProfile | null;
+  creator_profiles?: CreatorProfile[] | CreatorProfile | null;
+};
+
+/** Get lat/lon from user geo_data (supports flat or nested shape). */
+function getGeoCoords(user: User): { lat: number; lon: number } | null {
+  const g = user.geo_data as any;
+  if (!g) return null;
+  const lat = g.lat ?? g.geo_data?.lat;
+  const lon = g.lon ?? g.geo_data?.lon;
+  if (typeof lat !== "number" || typeof lon !== "number") return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  if (lat === 0 && lon === 0) return null;
+  return { lat, lon };
+}
+
+function getGeoField(
+  user: User,
+  field: "country" | "state" | "city",
+): string | null {
+  const g = user.geo_data as any;
+  if (!g) return null;
+  const value = g[field] ?? g.geo_data?.[field];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function getAdvertiserProfileFromRow(user: User): AdvertiserProfile | null {
+  if (!user.advertiser_profiles) return null;
+  return Array.isArray(user.advertiser_profiles)
+    ? user.advertiser_profiles.length > 0
+      ? user.advertiser_profiles[0]
+      : null
+    : user.advertiser_profiles;
+}
+
+function getCreatorProfileFromRow(user: User): CreatorProfile | null {
+  if (!user.creator_profiles) return null;
+  return Array.isArray(user.creator_profiles)
+    ? user.creator_profiles.length > 0
+      ? user.creator_profiles[0]
+      : null
+    : user.creator_profiles;
+}
+
+function getCreatorTrustScoreForRow(user: User): number {
+  const profile = getCreatorProfileFromRow(user);
+  return getCreatorTrustScoreFromMetrics(profile, user.id) ?? 100;
+}
+
+function SubcategoriesCell({
+  subcategories,
+  onViewAll,
+}: {
+  subcategories: string[];
+  onViewAll: (subcategories: any, categories: any) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLSpanElement>(null);
+  const [showMoreButton, setShowMoreButton] = useState(false);
+
+  useEffect(() => {
+    const checkOverflow = () => {
+      if (containerRef.current && contentRef.current) {
+        const containerWidth = containerRef.current.offsetWidth;
+        const contentWidth = contentRef.current.scrollWidth;
+        // Add some padding for the "More" button (approximately 60px)
+        setShowMoreButton(contentWidth > containerWidth - 60);
+      }
+    };
+
+    // Check after a short delay to ensure content is rendered
+    const timeoutId = setTimeout(checkOverflow, 0);
+
+    // Re-check on window resize
+    window.addEventListener("resize", checkOverflow);
+    return () => {
+      clearTimeout(timeoutId);
+      window.removeEventListener("resize", checkOverflow);
+    };
+  }, [subcategories]);
+
+  if (subcategories.length === 0) {
+    return <div>-</div>;
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex flex-wrap items-center gap-1 w-full"
+    >
+      <span
+        ref={contentRef}
+        className={`text-sm ${showMoreButton ? "truncate flex-1 min-w-0" : ""}`}
+        style={showMoreButton ? { maxWidth: "calc(100% - 10px)" } : {}}
+      >
+        {subcategories.join(", ")}
+      </span>
+      {showMoreButton && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-purple-600 underlineh-6 px-2 text-xs flex-shrink-0"
+          onClick={() => onViewAll(subcategories, null)}
+        >
+          More
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function InterestsCell({
+  interests,
+  onViewAll,
+}: {
+  interests: string[];
+  onViewAll: (interests: any) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLSpanElement>(null);
+  const [showMoreButton, setShowMoreButton] = useState(false);
+
+  useEffect(() => {
+    const checkOverflow = () => {
+      if (containerRef.current && contentRef.current) {
+        const containerWidth = containerRef.current.offsetWidth;
+        const contentWidth = contentRef.current.scrollWidth;
+        // Add some padding for the "More" button (approximately 60px)
+        setShowMoreButton(contentWidth > containerWidth - 60);
+      }
+    };
+
+    // Check after a short delay to ensure content is rendered
+    const timeoutId = setTimeout(checkOverflow, 0);
+
+    // Re-check on window resize
+    window.addEventListener("resize", checkOverflow);
+    return () => {
+      clearTimeout(timeoutId);
+      window.removeEventListener("resize", checkOverflow);
+    };
+  }, [interests]);
+
+  if (interests.length === 0) {
+    return <div>-</div>;
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex flex-wrap items-center gap-1 w-full"
+    >
+      <span
+        ref={contentRef}
+        className={`text-sm ${showMoreButton ? "truncate flex-1 min-w-0" : ""}`}
+        style={showMoreButton ? { maxWidth: "calc(100% - 60px)" } : {}}
+      >
+        {interests.join(", ")}
+      </span>
+      {showMoreButton && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-purple-600 h-6 px-2 text-xs underline flex-shrink-0"
+          onClick={() => onViewAll(interests)}
+        >
+          More
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// Pre-computed list of all countries for dropdown filters
+const ALL_COUNTRIES: string[] = Array.from(
+  new Set(
+    Object.values(REGIONS_AND_COUNTRIES_DATA)
+      .flat()
+      .map((c) => String(c)),
+  ),
+).sort((a, b) => a.localeCompare(b));
+
+const USERS_INITIAL_LIMIT = 200;
+const USERS_BACKGROUND_CHUNK = 2000;
+
+const isTableFilterColumn = (column: { id: string }) =>
+  column.id !== "profile" && column.id !== "support_chat";
+
+// Column definitions for each tab
+const allColumns = {
+  all: [
+    { id: "id", label: "ID" },
+    { id: "full_name", label: "Full Name" },
+    { id: "profile", label: "Profile" },
+    { id: "email", label: "Email" },
+    { id: "support_chat", label: "Support Chat" },
+    { id: "user_type", label: "User Type" },
+    { id: "referral_code", label: "Referral Code" },
+    { id: "referred_by", label: "Referred By" },
+    { id: "coins", label: "Coins" },
+    { id: "advertisers_referred", label: "Advertisers Referred" },
+    { id: "creators_referred", label: "Creators Referred" },
+    { id: "username", label: "Username" },
+    { id: "total_lifetime_coins", label: "Total Lifetime Coins" },
+    { id: "affiliate_earnings", label: "Affiliate Earnings" },
+    { id: "other_earnings", label: "Other Earnings" },
+    { id: "country", label: "Country" },
+    { id: "state", label: "State" },
+    { id: "city", label: "City" },
+    { id: "created_at", label: "Created At" },
+    { id: "updated_at", label: "Updated At" },
+  ],
+  advertisers: [
+    { id: "id", label: "ID" },
+    { id: "full_name", label: "Full Name" },
+    { id: "profile", label: "Profile" },
+    { id: "email", label: "Email" },
+    { id: "support_chat", label: "Support Chat" },
+    { id: "username", label: "Username" },
+    { id: "company_name", label: "Company Name" },
+    { id: "website_url", label: "Website URL" },
+    { id: "total_money_spent", label: "Total Money Spent" },
+    { id: "total_contests_run", label: "Total Contests Run" },
+    { id: "available_deposit_balance", label: "Available Deposit Balance" },
+    { id: "withdrawable_balance", label: "Withdrawable Balance" },
+    { id: "subscription_info", label: "Subscription Info" },
+    { id: "created_at", label: "Created At" },
+    { id: "updated_at", label: "Updated At" },
+  ],
+  creators: [
+    { id: "id", label: "ID" },
+    { id: "full_name", label: "Full Name" },
+    { id: "profile", label: "Profile" },
+    { id: "email", label: "Email" },
+    { id: "support_chat", label: "Support Chat" },
+    { id: "username", label: "Username" },
+    { id: "youtube_account", label: "YouTube Account" },
+    { id: "instagram_account", label: "Instagram Account" },
+    { id: "tiktok_account", label: "TikTok Account" },
+    { id: "twitter_account", label: "Twitter Account" },
+    { id: "contests_participated", label: "Contests Participated" },
+    { id: "contests_won", label: "Contests Won" },
+    { id: "total_views", label: "Total Views" },
+    { id: "total_money_won", label: "Total Money Won" },
+    { id: "withdrawable_balance", label: "Withdrawable Balance" },
+    { id: "total_submissions_made", label: "Total Submissions Made" },
+    { id: "total_submissions_won", label: "Total Submissions Won" },
+    { id: "total_reels", label: "Total Reels" },
+    { id: "trust_score", label: "Trust %" },
+    { id: "trust_number", label: "Trust Score" },
+    { id: "pending_reels", label: "Pending Reels" },
+    { id: "rejected_reels", label: "Rejected Reels" },
+    { id: "verified_reels", label: "Verified Reels" },
+    { id: "avg_quality_score", label: "Avg Quality Score" },
+    { id: "best_quality_score", label: "Best Quality Score" },
+    { id: "quality_score_sum", label: "Quality Score Sum" },
+    { id: "scored_verified_count", label: "Score Verified Count" },
+    { id: "quality_score_counts", label: "Quality Score Counts" },
+    { id: "date_of_birth", label: "Date of Birth" },
+    { id: "gender", label: "Gender" },
+    { id: "country", label: "Country" },
+    { id: "state", label: "State" },
+    { id: "city", label: "City" },
+    { id: "address", label: "Address" },
+    { id: "language", label: "Language" },
+    { id: "categories", label: "Categories" },
+    { id: "subcategories", label: "Subcategories" },
+    { id: "interests", label: "Interests" },
+    { id: "created_at", label: "Created At" },
+    { id: "updated_at", label: "Updated At" },
+  ],
+};
+
+export default function AdminUsersPage() {
+  // Scheduled notification poller is registered in AdminNotificationsView.
+
+  // Operator mapping for dropdown display
+  const operatorMap: Record<string, { label: string; symbol: string }> = {
+    "=": { label: "Equals", symbol: "=" },
+    "!=": { label: "Not equal", symbol: "≠" },
+    ">": { label: "Greater than", symbol: ">" },
+    "<": { label: "Less than", symbol: "<" },
+    ">=": { label: "Greater than or equal", symbol: "≥" },
+    "<=": { label: "Less than or equal", symbol: "≤" },
+  };
+
+  const [rows, setRows] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
+  const [usersLoadError, setUsersLoadError] = useState(false);
+  const [usersBackgroundLoadError, setUsersBackgroundLoadError] =
+    useState(false);
+  const [userCounts, setUserCounts] = useState({
+    all: 0,
+    advertisers: 0,
+    creators: 0,
+  });
+  const usersLoadAbortRef = useRef<AbortController | null>(null);
+  const usersLoadGenerationRef = useRef(0);
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(25);
+  const [activeTab, setActiveTab] = useState("all");
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      // Check data-mode attribute from parent layout
+      const modeElement = document.querySelector("[data-mode]");
+      if (modeElement) {
+        const dataMode = modeElement.getAttribute("data-mode");
+        return dataMode === "dark";
+      }
+      // Fallback to data-theme attribute
+      const themeElement = document.documentElement;
+      const dataTheme = themeElement.getAttribute("data-theme");
+      return dataTheme === "dark";
+    }
+    return false; // Default to light mode
+  });
+  const [selectedSubscriptionInfo, setSelectedSubscriptionInfo] = useState<
+    any | null
+  >(null);
+  const [isSubscriptionDialogOpen, setIsSubscriptionDialogOpen] =
+    useState(false);
+  const [selectedSubcategories, setSelectedSubcategories] = useState<
+    any | null
+  >(null);
+  const [selectedCategories, setSelectedCategories] = useState<any | null>(
+    null,
+  );
+  const [isSubcategoriesDialogOpen, setIsSubcategoriesDialogOpen] =
+    useState(false);
+  const [selectedInterests, setSelectedInterests] = useState<any | null>(null);
+  const [isInterestsDialogOpen, setIsInterestsDialogOpen] = useState(false);
+  const [availableSubscriptionPlans, setAvailableSubscriptionPlans] = useState<
+    { id: string; name: string }[]
+  >([]);
+  // Sort state per tab - each tab maintains its own sort state
+  const [sortState, setSortState] = useState<
+    Record<string, { column: string | null; order: "asc" | "desc" | null }>
+  >({
+    all: { column: null, order: null },
+    advertisers: { column: null, order: null },
+    creators: { column: null, order: null },
+  });
+
+  // Load all subscription plans from constants for dropdown filtering
+  useEffect(() => {
+    const allPlans = getAllSubscriptionPlans();
+    const plansArray = allPlans.map((plan: any) => ({
+      id: plan.productId || plan.id || "",
+      name: plan.displayName || plan.name || plan.id || "Unknown",
+    }));
+    setAvailableSubscriptionPlans(plansArray);
+  }, []);
+
+  // Helper functions to get/set sort state for current tab
+  const getSortState = () => {
+    return sortState[activeTab] || { column: null, order: null };
+  };
+
+  const setSortColumn = (column: string | null) => {
+    setSortState((prev) => ({
+      ...prev,
+      [activeTab]: {
+        ...(prev[activeTab] || { column: null, order: null }),
+        column,
+      },
+    }));
+  };
+
+  const setSortOrder = (order: "asc" | "desc" | null) => {
+    setSortState((prev) => ({
+      ...prev,
+      [activeTab]: {
+        ...(prev[activeTab] || { column: null, order: null }),
+        order,
+      },
+    }));
+  };
+
+  const setSort = (column: string | null, order: "asc" | "desc" | null) => {
+    setSortState((prev) => ({
+      ...prev,
+      [activeTab]: {
+        column,
+        order,
+      },
+    }));
+  };
+
+  // Get current tab's sort values (reactive to sortState and activeTab changes)
+  const sortColumn = useMemo(
+    () => getSortState().column,
+    [sortState, activeTab],
+  );
+  const sortOrder = useMemo(() => getSortState().order, [sortState, activeTab]);
+
+  // Reusable sortable table header for any column
+  const SortableHeader = ({
+    columnId,
+    label,
+    className,
+  }: {
+    columnId: string;
+    label: string;
+    className?: string;
+  }) => (
+    <TableHead
+      className={cn(
+        "whitespace-nowrap border-r",
+        isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+        className,
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <span>{label}</span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+              <ChevronDown className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={() => {
+                setSortColumn(columnId);
+                setSortOrder("asc");
+              }}
+              className={cn(
+                sortColumn === columnId && sortOrder === "asc" && "bg-accent",
+              )}
+            >
+              Sort by Ascending
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                setSortColumn(columnId);
+                setSortOrder("desc");
+              }}
+              className={cn(
+                sortColumn === columnId && sortOrder === "desc" && "bg-accent",
+              )}
+            >
+              Sort by Descending
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                setSortColumn(null);
+                setSortOrder(null);
+              }}
+            >
+              Clear Sort
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </TableHead>
+  );
+
+  // Column visibility state - initialize all columns as visible
+  const [visibleColumns, setVisibleColumns] = useState<
+    Record<string, Set<string>>
+  >({
+    all: new Set(allColumns.all.map((col) => col.id)),
+    advertisers: new Set(allColumns.advertisers.map((col) => col.id)),
+    creators: new Set(allColumns.creators.map((col) => col.id)),
+  });
+  const [showColumnSettings, setShowColumnSettings] = useState(false);
+  const [stickyHeader, setStickyHeader] = useState(true);
+  const [viewMode, setViewMode] = useState<
+    "table" | "map" | "notifications" | "email"
+  >(() => {
+    if (typeof window !== "undefined") {
+      if (sessionStorage.getItem("wu_mode") === "1") return "table";
+      if (sessionStorage.getItem("email_lead_mode") === "1") return "table";
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("tab") === "email") return "email";
+      const saved = localStorage.getItem("users-management-view-mode");
+      // Restore table/map/notifications only — email data loads when user opens Email tab
+      if (saved === "table" || saved === "map" || saved === "notifications") {
+        return saved;
+      }
+    }
+    return "table";
+  });
+  const [emailTabVisited, setEmailTabVisited] = useState(
+    () => viewMode === "email",
+  );
+  const { toast } = useToast();
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [selectAllFiltered, setSelectAllFiltered] = useState(false);
+  const [sendModalOpen, setSendModalOpen] = useState(false);
+  const [emailSendModalOpen, setEmailSendModalOpen] = useState(false);
+  const [emailBundlesModalOpen, setEmailBundlesModalOpen] = useState(false);
+  const [bundlesModalVariant, setBundlesModalVariant] =
+    useState<AddLeadsModalVariant>("bundle");
+  const [bundlesModalDefaultTab, setBundlesModalDefaultTab] = useState<
+    "select" | "create" | "add" | "import"
+  >("select");
+  const [warmupSelectMode, setWarmupSelectMode] = useState(() => {
+    if (typeof window !== "undefined") {
+      return sessionStorage.getItem("wu_mode") === "1";
+    }
+    return false;
+  });
+  const [emailLeadSelectMode, setEmailLeadSelectMode] = useState(() => {
+    if (typeof window !== "undefined") {
+      return sessionStorage.getItem("email_lead_mode") === "1";
+    }
+    return false;
+  });
+  const [emailLeadCampaignId, setEmailLeadCampaignId] = useState<string | null>(
+    () => {
+      if (typeof window !== "undefined") {
+        return sessionStorage.getItem("email_lead_campaign_id");
+      }
+      return null;
+    },
+  );
+  const [emailLeadCampaignName, setEmailLeadCampaignName] = useState<
+    string | null
+  >(() => {
+    if (typeof window !== "undefined") {
+      return sessionStorage.getItem("email_lead_campaign_name");
+    }
+    return null;
+  });
+  const [wuMaxRecipients, setWuMaxRecipients] = useState<number | null>(null);
+
+  const clearEmailLeadSelectMode = () => {
+    setEmailLeadSelectMode(false);
+    setEmailLeadCampaignId(null);
+    setEmailLeadCampaignName(null);
+    clearEmailLeadSelectModeStorage();
+  };
+
+  useEffect(() => {
+    if (!warmupSelectMode) {
+      setWuMaxRecipients(null);
+      return;
+    }
+    const raw = sessionStorage.getItem("wu_max_recipients");
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    setWuMaxRecipients(Number.isFinite(parsed) ? parsed : null);
+  }, [warmupSelectMode]);
+  const [highlightCampaignId, setHighlightCampaignId] = useState<string | null>(
+    null,
+  );
+  const [highlightEmailCampaignId, setHighlightEmailCampaignId] = useState<
+    string | null
+  >(() => {
+    if (typeof window !== "undefined") {
+      return new URLSearchParams(window.location.search).get("campaignId");
+    }
+    return null;
+  });
+
+  const setViewModePersisted = (
+    mode: "table" | "map" | "notifications" | "email",
+  ) => {
+    setViewMode(mode);
+    if (mode === "email") {
+      setEmailTabVisited(true);
+    }
+    if (typeof window !== "undefined") {
+      localStorage.setItem("users-management-view-mode", mode);
+    }
+  };
+
+  useEffect(() => {
+    void import("./AdminEmailView");
+  }, []);
+
+  // Warm-up selection mode: listen for event dispatched from WarmUpManualSendModal
+  useEffect(() => {
+    const handleEnterSelect = () => {
+      setSelectedUserIds(new Set());
+      setSelectAllFiltered(false);
+      setWarmupSelectMode(true);
+      setViewModePersisted("table");
+    };
+    window.addEventListener("wu:enter-select-mode", handleEnterSelect);
+    return () =>
+      window.removeEventListener("wu:enter-select-mode", handleEnterSelect);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Email lead selection mode: dispatched from campaign Lead tab "Add Leads"
+  useEffect(() => {
+    const handleEnterLeadSelect = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          campaignId?: string;
+          campaignName?: string | null;
+          preselectedUserIds?: string[];
+        }>
+      ).detail;
+      const campaignId =
+        detail?.campaignId ?? sessionStorage.getItem("email_lead_campaign_id");
+      const campaignName =
+        detail?.campaignName ??
+        sessionStorage.getItem("email_lead_campaign_name");
+      const preselectedUserIds =
+        detail?.preselectedUserIds ?? readEmailLeadPreselectedUserIds();
+
+      setSelectAllFiltered(false);
+      setEmailLeadSelectMode(true);
+      setEmailLeadCampaignId(campaignId);
+      setEmailLeadCampaignName(campaignName);
+      setSelectedUserIds(new Set(preselectedUserIds));
+      setViewModePersisted("table");
+    };
+    window.addEventListener(
+      "email:enter-lead-select-mode",
+      handleEnterLeadSelect,
+    );
+    return () =>
+      window.removeEventListener(
+        "email:enter-lead-select-mode",
+        handleEnterLeadSelect,
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Restore pre-selected users when returning via sessionStorage (e.g. page refresh)
+  useEffect(() => {
+    if (!emailLeadSelectMode) return;
+    const preselected = readEmailLeadPreselectedUserIds();
+    if (preselected.length === 0) return;
+    setSelectedUserIds((prev) => {
+      if (prev.size > 0) return prev;
+      return new Set(preselected);
+    });
+  }, [emailLeadSelectMode]);
+
+  const syncSupportChatEnabled = (userId: string, enabled: boolean) => {
+    setRows((prev) =>
+      prev.map((u) =>
+        u.id === userId ? { ...u, support_chat_enabled: enabled } : u,
+      ),
+    );
+  };
+
+  const userToRecipientRow = (u: User): RecipientUserRow => {
+    const creatorProfile = getCreatorProfileFromRow(u);
+    const advertiserProfile = getAdvertiserProfileFromRow(u);
+    const isCreator = u.user_type === "creator";
+    const isAdvertiser = u.user_type === "advertiser";
+
+    return {
+      id: u.id,
+      email: u.email,
+      full_name: u.full_name,
+      username: u.username ?? null,
+      user_type: u.user_type,
+      coins: u.coins,
+      referral_code: u.referral_code ?? null,
+      created_at: u.created_at,
+      is_active: u.is_active,
+      total_lifetime_coins_earned: u.total_lifetime_coins_earned ?? 0,
+      affiliate_earnings: u.affiliate_earnings ?? 0,
+      other_earnings: u.other_earnings ?? 0,
+      advertisers_referred: u.advertisers_referred ?? 0,
+      creators_referred: u.creators_referred ?? 0,
+      total_money_won: isCreator ? (creatorProfile?.total_money_won ?? 0) : 0,
+      withdrawable_balance: isCreator
+        ? (creatorProfile?.withdrawable_balance ?? 0)
+        : isAdvertiser
+          ? (advertiserProfile?.withdrawable_balance ?? 0)
+          : 0,
+      total_contests_won: isCreator
+        ? (creatorProfile?.total_contests_won ?? 0)
+        : 0,
+      total_contests_participated: isCreator
+        ? (creatorProfile?.total_contests_participated ?? 0)
+        : 0,
+      total_money_spent: isAdvertiser
+        ? (advertiserProfile?.total_money_spent ?? 0)
+        : 0,
+      total_contests_run: isAdvertiser
+        ? (advertiserProfile?.total_contests_run ?? 0)
+        : 0,
+      available_deposit_balance: isAdvertiser
+        ? (advertiserProfile?.available_deposit_balance ?? 0)
+        : 0,
+    };
+  };
+
+  const [mapGroupBy, setMapGroupBy] = useState<
+    "region" | "state" | "country" | "city"
+  >("country");
+
+  // Timezone preference state with localStorage persistence
+  const [timezone, setTimezone] = useState<"UTC" | "local">(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("users-management-timezone");
+      return saved === "UTC" || saved === "local" ? saved : "UTC";
+    }
+    return "UTC";
+  });
+
+  // Helper function to format dates based on timezone preference
+  const formatDate = (dateString: string | null | undefined): string => {
+    if (!dateString) return "-";
+    const date = new Date(dateString);
+    return date.toLocaleString("en-US", {
+      timeZone: timezone === "UTC" ? "UTC" : undefined,
+      hour12: false, // Use 24-hour format
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  };
+
+  // Filter state
+  type FilterType = {
+    id: string;
+    column: string;
+    value: string;
+    operator?: string; // For comparison operators: "=", ">", "<", ">=", "<="
+  };
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [filters, setFilters] = useState<FilterType[]>([]);
+  const [emptyFilterColumn, setEmptyFilterColumn] = useState<string>("");
+  const [emptyFilterValue, setEmptyFilterValue] = useState<string>("");
+  const [emptyFilterOperator, setEmptyFilterOperator] = useState<string>("=");
+
+  // Toggle column visibility
+  const toggleColumn = (columnId: string) => {
+    setVisibleColumns((prev) => {
+      const newState = { ...prev };
+      const currentSet = new Set(newState[activeTab]);
+      if (currentSet.has(columnId)) {
+        currentSet.delete(columnId);
+      } else {
+        currentSet.add(columnId);
+      }
+      newState[activeTab] = currentSet;
+      return newState;
+    });
+  };
+
+  // Check if column is visible
+  const isColumnVisible = (columnId: string) => {
+    return visibleColumns[activeTab]?.has(columnId) ?? true;
+  };
+
+  // Get count of visible columns for current tab
+  const getVisibleColumnsCount = () => {
+    return (
+      visibleColumns[activeTab]?.size ??
+      allColumns[activeTab as keyof typeof allColumns].length
+    );
+  };
+
+  // Helper for username sorting:
+  // Ascending: numbers -> letters/other -> null
+  // Descending: letters/other -> numbers -> null.
+
+  const getUsernameSortMeta = (username: string | null | undefined) => {
+    if (!username) {
+      return { rank: 2, value: "" }; // null/empty last
+    }
+    const vRaw = username.toLowerCase();
+    // Strip leading underscores for comparison
+    const v = vRaw.replace(/^_+/, "");
+    const firstChar = v.charAt(0);
+    const isDigit = /^[0-9]/.test(firstChar);
+    const isLetter = /^[a-z]/.test(firstChar);
+
+    // base rank 0 = numeric, 1 = alphabetic/other, 2 = null/empty
+    if (isDigit) return { rank: 0, value: v };
+    if (isLetter) return { rank: 1, value: v };
+    return { rank: 1, value: v };
+  };
+
+  const normalizeForAlphabetSort = (value: string | null | undefined) => {
+    if (!value) return "";
+    const lower = value.toLowerCase();
+    // Find the first Unicode letter (covers fancy script letters ).
+    const match = lower.match(/\p{L}/u);
+    if (!match || match.index === undefined) {
+      // No letter found – fall back to the full lowercased string.
+      return lower;
+    }
+    return lower.slice(match.index);
+  };
+
+  // Helper function to get column value from a row for filtering
+  const getColumnValue = (row: User, columnId: string): any => {
+    switch (columnId) {
+      case "id":
+        return row.id;
+      case "full_name":
+        return row.full_name;
+      case "email":
+        return row.email;
+      case "username":
+        return row.username;
+      case "user_type":
+        return row.user_type;
+      case "support_chat":
+        return row.support_chat_enabled !== false;
+      case "country": {
+        return getGeoField(row, "country");
+      }
+      case "referral_code":
+        return row.referral_code;
+      case "referred_by":
+        return row.referred_by;
+      case "coins":
+        return row.coins;
+      case "advertisers_referred":
+        return row.advertisers_referred;
+      case "creators_referred":
+        return row.creators_referred;
+      case "total_lifetime_coins":
+        return row.total_lifetime_coins_earned;
+      case "affiliate_earnings":
+        return row.affiliate_earnings;
+      case "other_earnings":
+        return row.other_earnings;
+      case "created_at":
+        return row.created_at;
+      case "updated_at":
+        return row.updated_at;
+      // Advertiser-specific columns
+      case "company_name":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.company_name;
+        }
+        return null;
+      case "website_url":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.website_url;
+        }
+        return null;
+      case "total_money_spent":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.total_money_spent;
+        }
+        return null;
+      case "total_contests_run":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.total_contests_run;
+        }
+        return null;
+      case "available_deposit_balance":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.available_deposit_balance;
+        }
+        return null;
+      case "withdrawable_balance":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.withdrawable_balance;
+        }
+        // Check creator profiles too
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.withdrawable_balance;
+        }
+        return null;
+      case "subscription_info":
+        if (row.advertiser_profiles) {
+          const profiles = Array.isArray(row.advertiser_profiles)
+            ? row.advertiser_profiles
+            : [row.advertiser_profiles];
+          return profiles[0]?.subscription_info;
+        }
+        return null;
+      // Creator-specific columns
+      case "contests_participated":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_contests_participated;
+        }
+        return null;
+      case "contests_won":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_contests_won;
+        }
+        return null;
+      case "total_views":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_views;
+        }
+        return null;
+      case "total_money_won":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_money_won;
+        }
+        return null;
+      case "total_submissions_made":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_submissions_made;
+        }
+        return null;
+      case "total_submissions_won":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.total_submissions_won;
+        }
+        return null;
+      case "trust_score":
+      case "trust_number":
+      case "total_reels":
+      case "pending_reels":
+      case "rejected_reels":
+      case "verified_reels": {
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const m = profiles[0]?.trust_score_metrics;
+          if (m) {
+            try {
+              const parsed = typeof m === "string" ? JSON.parse(m) : m;
+              const val = parsed?.[columnId];
+              if (val !== undefined && val !== null) return Number(val);
+            } catch {}
+          }
+        }
+        return columnId === "trust_score" ? 100 : 0;
+      }
+      case "avg_quality_score":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.avg_quality_score;
+        }
+        return null;
+      case "best_quality_score":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.best_quality_score;
+        }
+        return null;
+      case "quality_score_sum":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.quality_score_sum;
+        }
+        return null;
+      case "scored_verified_count":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.scored_verified_count;
+        }
+        return null;
+      case "quality_score_counts":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const c = profiles[0]?.quality_score_counts;
+          return c ? JSON.stringify(c) : "";
+        }
+        return "";
+      case "date_of_birth":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.date_of_birth;
+        }
+        return null;
+      case "gender":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          return profiles[0]?.gender;
+        }
+        return null;
+      case "state":
+        return getGeoField(row, "state");
+      case "city":
+        return getGeoField(row, "city");
+      case "youtube_account":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const yt = profile?.youtube_account;
+          if (!yt) return null;
+          try {
+            const account = typeof yt === "string" ? JSON.parse(yt) : yt;
+            return (
+              account?.channel_title || account?.channel_custom_url || null
+            );
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      case "instagram_account":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const ig = profile?.instagram_account;
+          if (!ig) return null;
+          try {
+            const account = typeof ig === "string" ? JSON.parse(ig) : ig;
+            return account?.name_of_account || account?.username || null;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      case "tiktok_account":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const tt = profile?.tiktok_account;
+          if (!tt) return null;
+          try {
+            const account = typeof tt === "string" ? JSON.parse(tt) : tt;
+            return account?.display_name || account?.username || null;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      case "twitter_account":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const tw = profile?.twitter_account;
+          if (!tw) return null;
+          try {
+            const account = typeof tw === "string" ? JSON.parse(tw) : tw;
+            return account?.name || account?.username || null;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      case "language":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const langs = profile?.languages;
+          if (!langs) return null;
+          if (Array.isArray(langs)) {
+            return langs.join(", ");
+          }
+          return typeof langs === "string" ? langs : JSON.stringify(langs);
+        }
+        return null;
+      case "categories":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const categories = profile?.categories;
+          if (!categories) return null;
+          if (Array.isArray(categories)) {
+            return categories.join(", ");
+          }
+          if (typeof categories === "string") {
+            return categories;
+          }
+          return JSON.stringify(categories);
+        }
+        return null;
+      case "subcategories":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const subcategories = profile?.subcategories;
+          if (!subcategories) return null;
+
+          let subcategoriesArray: string[] = [];
+          if (Array.isArray(subcategories)) {
+            subcategoriesArray = subcategories.map((item: any) => {
+              if (typeof item === "object" && item !== null) {
+                if (item.category && item.subcategory) {
+                  return `${item.category}: ${item.subcategory}`;
+                }
+                return JSON.stringify(item);
+              }
+              return String(item);
+            });
+          } else if (typeof subcategories === "string") {
+            try {
+              const parsed = JSON.parse(subcategories);
+              if (Array.isArray(parsed)) {
+                subcategoriesArray = parsed.map((item: any) => {
+                  if (typeof item === "object" && item !== null) {
+                    if (item.category && item.subcategory) {
+                      return `${item.category}: ${item.subcategory}`;
+                    }
+                    return JSON.stringify(item);
+                  }
+                  return String(item);
+                });
+              } else {
+                subcategoriesArray = [subcategories];
+              }
+            } catch {
+              subcategoriesArray = subcategories
+                .split(",")
+                .map((s) => s.trim());
+            }
+          } else {
+            subcategoriesArray = [JSON.stringify(subcategories)];
+          }
+
+          return subcategoriesArray.join(", ");
+        }
+        return null;
+      case "interests":
+        if (row.creator_profiles) {
+          const profiles = Array.isArray(row.creator_profiles)
+            ? row.creator_profiles
+            : [row.creator_profiles];
+          const profile = profiles[0];
+          const interests = profile?.interests;
+          if (!interests) return null;
+
+          let interestsArray: string[] = [];
+          if (Array.isArray(interests)) {
+            interestsArray = interests;
+          } else if (typeof interests === "string") {
+            try {
+              const parsed = JSON.parse(interests);
+              interestsArray = Array.isArray(parsed) ? parsed : [interests];
+            } catch {
+              interestsArray = interests.split(",").map((s) => s.trim());
+            }
+          } else {
+            interestsArray = [JSON.stringify(interests)];
+          }
+
+          return interestsArray.join(", ");
+        }
+        return null;
+      default:
+        return null;
+    }
+  };
+
+  // Filter by tab
+  const tabFiltered = useMemo(() => {
+    let filtered = rows;
+    if (activeTab === "all") {
+      filtered = rows;
+    } else if (activeTab === "advertisers") {
+      // Show all users with user_type === "advertiser"
+      // advertiser_profiles data will be shown when available
+      filtered = rows.filter((r) => r.user_type === "advertiser");
+    } else if (activeTab === "creators") {
+      filtered = rows.filter((r) => r.user_type === "creator");
+    }
+
+    // Apply sorting based on active tab
+    if (activeTab === "all") {
+      if (sortOrder && sortColumn) {
+        filtered = [...filtered].sort((a, b) => {
+          let aValue: any;
+          let bValue: any;
+
+          // Shared helper for referral_code sorting:
+          // Ascending: numbers -> letters/other -> null
+          // Descending: letters/other -> numbers -> null.
+
+          const getReferralSortMeta = (
+            value: string | null | undefined,
+          ): { rank: number; value: string } => {
+            if (!value) return { rank: 2, value: "" };
+            const vRaw = value.toLowerCase();
+            const v = vRaw.replace(/^_+/, "");
+            const firstChar = v.charAt(0);
+            const isDigit = /^[0-9]/.test(firstChar);
+            const isLetter = /^[a-z]/.test(firstChar);
+
+            if (isDigit) return { rank: 0, value: v };
+            if (isLetter) return { rank: 1, value: v };
+            return { rank: 1, value: v };
+          };
+
+          // Get values based on sort column
+          switch (sortColumn) {
+            case "id":
+              aValue = a.id || "";
+              bValue = b.id || "";
+              break;
+            case "full_name":
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+              break;
+            case "email":
+              aValue = a.email?.toLowerCase() || "";
+              bValue = b.email?.toLowerCase() || "";
+              break;
+            case "country": {
+              const getCountryMeta = (
+                user: User,
+              ): { hasCountry: boolean; value: string } => {
+                const geoCountry = getGeoField(user, "country");
+                if (geoCountry) {
+                  return {
+                    hasCountry: true,
+                    value: geoCountry.toLowerCase(),
+                  };
+                }
+                return { hasCountry: false, value: "" };
+              };
+
+              const aMeta = getCountryMeta(a);
+              const bMeta = getCountryMeta(b);
+
+              // First, ensure all users WITH a country come before those WITHOUT
+              if (aMeta.hasCountry !== bMeta.hasCountry) {
+                // hasCountry=true (1) should come before hasCountry=false (0)
+                return aMeta.hasCountry ? -1 : 1;
+              }
+
+              // If both have (or both don't have) a country, sort alphabetically
+              if (!aMeta.hasCountry && !bMeta.hasCountry) {
+                return 0; // both missing -> consider equal
+              }
+
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp === 0) return 0;
+              return sortOrder === "asc" ? cmp : -cmp;
+            }
+            case "state":
+            case "city": {
+              const field = sortColumn as "state" | "city";
+              const getGeoMeta = (
+                user: User,
+              ): { hasValue: boolean; value: string } => {
+                const geoValue = getGeoField(user, field);
+                if (geoValue) {
+                  return { hasValue: true, value: geoValue.toLowerCase() };
+                }
+                return { hasValue: false, value: "" };
+              };
+
+              const aMeta = getGeoMeta(a);
+              const bMeta = getGeoMeta(b);
+
+              // Keep users with a location value before empty values for both asc/desc.
+              if (aMeta.hasValue !== bMeta.hasValue) {
+                return aMeta.hasValue ? -1 : 1;
+              }
+
+              if (!aMeta.hasValue && !bMeta.hasValue) {
+                return 0;
+              }
+
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp === 0) return 0;
+              return sortOrder === "asc" ? cmp : -cmp;
+            }
+            case "user_type":
+              aValue = a.user_type?.toLowerCase() || "";
+              bValue = b.user_type?.toLowerCase() || "";
+              break;
+            case "support_chat":
+              aValue = a.support_chat_enabled !== false ? 1 : 0;
+              bValue = b.support_chat_enabled !== false ? 1 : 0;
+              break;
+            case "referral_code": {
+              const aMeta = getReferralSortMeta(a.referral_code || null);
+              const bMeta = getReferralSortMeta(b.referral_code || null);
+
+              // - Asc: numbers -> letters/other -> null
+              // - Desc: letters/other -> numbers -> null
+              const mapReferralRankForOrder = (rank: number) => {
+                if (sortOrder === "asc") return rank;
+                // For desc, flip 0 and 1; keep 2 (null) last
+                if (rank === 0) return 1;
+                if (rank === 1) return 0;
+                return 2;
+              };
+
+              const aRank = mapReferralRankForOrder(aMeta.rank);
+              const bRank = mapReferralRankForOrder(bMeta.rank);
+
+              if (aRank !== bRank) {
+                return aRank - bRank;
+              }
+
+              // Then compare alphabetically within the same group
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp !== 0) {
+                return sortOrder === "asc" ? cmp : -cmp;
+              }
+
+              return 0;
+            }
+            case "referred_by": {
+              const getReferredByMeta = (
+                value: string | null | undefined,
+              ): { rank: number; value: string } => {
+                if (!value) return { rank: 2, value: "" }; // null/empty last
+                const v = value.toLowerCase();
+                const firstChar = v.charAt(0);
+                const isDigit = /^[0-9]/.test(firstChar);
+                const isLetter = /^[a-z]/.test(firstChar);
+                // rank 0 = numeric, 1 = alphabetic/other
+                if (isDigit) return { rank: 0, value: v };
+                if (isLetter) return { rank: 1, value: v };
+                return { rank: 1, value: v };
+              };
+
+              const aMeta = getReferredByMeta(a.referred_by || null);
+              const bMeta = getReferredByMeta(b.referred_by || null);
+
+              // - Asc: numbers -> letters/other -> null
+              // - Desc: letters/other -> numbers -> null
+              const mapRankForOrder = (rank: number) => {
+                // rank 0: numeric, 1: alpha/other, 2: null/empty
+                if (sortOrder === "asc") return rank;
+                // For desc, flip 0 and 1; keep 2 (null) last
+                if (rank === 0) return 1;
+                if (rank === 1) return 0;
+                return 2;
+              };
+
+              const aRank = mapRankForOrder(aMeta.rank);
+              const bRank = mapRankForOrder(bMeta.rank);
+
+              if (aMeta.rank !== bMeta.rank) {
+                return aRank - bRank;
+              }
+
+              // Then compare alphabetically within the same group
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp !== 0) {
+                return sortOrder === "asc" ? cmp : -cmp;
+              }
+
+              return 0;
+            }
+            case "username": {
+              const aMeta = getUsernameSortMeta(a.username);
+              const bMeta = getUsernameSortMeta(b.username);
+
+              // - Asc: numbers -> letters/other -> null
+              // - Desc: letters/other -> numbers -> null
+              const mapUsernameRankForOrder = (rank: number) => {
+                // rank 0: numeric, 1: alpha/other, 2: null/empty
+                if (sortOrder === "asc") return rank;
+                // For desc, flip 0 and 1; keep 2 (null) last
+                if (rank === 0) return 1;
+                if (rank === 1) return 0;
+                return 2;
+              };
+
+              const aRank = mapUsernameRankForOrder(aMeta.rank);
+              const bRank = mapUsernameRankForOrder(bMeta.rank);
+
+              if (aRank !== bRank) {
+                return aRank - bRank;
+              }
+
+              // Then compare alphabetically within the same group
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp !== 0) {
+                return sortOrder === "asc" ? cmp : -cmp;
+              }
+
+              return 0;
+            }
+            case "advertisers_referred":
+              aValue = a.advertisers_referred || 0;
+              bValue = b.advertisers_referred || 0;
+              break;
+            case "creators_referred":
+              aValue = a.creators_referred || 0;
+              bValue = b.creators_referred || 0;
+              break;
+            case "coins":
+              aValue = a.coins || 0;
+              bValue = b.coins || 0;
+              break;
+            case "total_lifetime_coins":
+              aValue = a.total_lifetime_coins_earned || 0;
+              bValue = b.total_lifetime_coins_earned || 0;
+              break;
+            case "affiliate_earnings":
+              aValue = a.affiliate_earnings || 0;
+              bValue = b.affiliate_earnings || 0;
+              break;
+            case "other_earnings":
+              aValue = a.other_earnings || 0;
+              bValue = b.other_earnings || 0;
+              break;
+            case "created_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aCreatedDate = a.created_at ? new Date(a.created_at) : null;
+              const bCreatedDate = b.created_at ? new Date(b.created_at) : null;
+              aValue =
+                aCreatedDate && !isNaN(aCreatedDate.getTime())
+                  ? aCreatedDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bCreatedDate && !isNaN(bCreatedDate.getTime())
+                  ? bCreatedDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            case "updated_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aUpdatedDate = a.updated_at ? new Date(a.updated_at) : null;
+              const bUpdatedDate = b.updated_at ? new Date(b.updated_at) : null;
+              aValue =
+                aUpdatedDate && !isNaN(aUpdatedDate.getTime())
+                  ? aUpdatedDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bUpdatedDate && !isNaN(bUpdatedDate.getTime())
+                  ? bUpdatedDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            default:
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+          }
+
+          // Handle numeric vs string comparison
+          if (typeof aValue === "number" && typeof bValue === "number") {
+            return sortOrder === "asc" ? aValue - bValue : bValue - aValue;
+          } else {
+            if (sortOrder === "asc") {
+              return String(aValue).localeCompare(String(bValue));
+            } else {
+              return String(bValue).localeCompare(String(aValue));
+            }
+          }
+        });
+      } else if (sortOrder) {
+        // Fallback to full_name sorting if no column specified
+        filtered = [...filtered].sort((a, b) => {
+          const aValue = a.full_name?.toLowerCase() || "";
+          const bValue = b.full_name?.toLowerCase() || "";
+
+          if (sortOrder === "asc") {
+            return aValue.localeCompare(bValue);
+          } else {
+            return bValue.localeCompare(aValue);
+          }
+        });
+      }
+    } else if (activeTab === "advertisers") {
+      if (sortOrder && sortColumn) {
+        filtered = [...filtered].sort((a, b) => {
+          let aValue: any;
+          let bValue: any;
+
+          // Get advertiser profiles
+          const aProfile = Array.isArray(a.advertiser_profiles)
+            ? a.advertiser_profiles.length > 0
+              ? a.advertiser_profiles[0]
+              : null
+            : a.advertiser_profiles || null;
+          const bProfile = Array.isArray(b.advertiser_profiles)
+            ? b.advertiser_profiles.length > 0
+              ? b.advertiser_profiles[0]
+              : null
+            : b.advertiser_profiles || null;
+
+          const getSubscriptionPlanName = (rawInfo: any) => {
+            if (!rawInfo) return "";
+            try {
+              const info =
+                typeof rawInfo === "string" ? JSON.parse(rawInfo) : rawInfo;
+
+              const isActive =
+                info?.status === "active" || info?.status === "trialing";
+              if (!isActive) {
+                return "";
+              }
+
+              if (!info?.product_id) return "";
+              const plan = getSubscriptionPlanById(info.product_id);
+              return (
+                plan?.displayName?.toLowerCase() ||
+                plan?.name?.toLowerCase() ||
+                ""
+              );
+            } catch {
+              return "";
+            }
+          };
+
+          // Get values based on sort column
+          switch (sortColumn) {
+            case "id":
+              aValue = a.id || "";
+              bValue = b.id || "";
+              break;
+            case "full_name":
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+              break;
+            case "email":
+              aValue = a.email?.toLowerCase() || "";
+              bValue = b.email?.toLowerCase() || "";
+              break;
+            case "username": {
+              const aMeta = getUsernameSortMeta(a.username);
+              const bMeta = getUsernameSortMeta(b.username);
+
+              // First compare by rank (numbers vs letters/other vs null/empty).
+              // We adjust effective rank based on sortOrder so that:
+              // - Asc: numbers -> letters/other -> null
+              // - Desc: letters/other -> numbers -> null
+              const mapUsernameRankForOrder = (rank: number) => {
+                // rank 0: numeric, 1: alpha/other, 2: null/empty
+                if (sortOrder === "asc") return rank;
+                // For desc, flip 0 and 1; keep 2 (null) last
+                if (rank === 0) return 1;
+                if (rank === 1) return 0;
+                return 2;
+              };
+
+              const aRank = mapUsernameRankForOrder(aMeta.rank);
+              const bRank = mapUsernameRankForOrder(bMeta.rank);
+
+              if (aRank !== bRank) {
+                return aRank - bRank;
+              }
+
+              // Then compare alphabetically within the same group
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp !== 0) {
+                return sortOrder === "asc" ? cmp : -cmp;
+              }
+
+              return 0;
+            }
+            case "company_name":
+              aValue = aProfile?.company_name?.toLowerCase() || "";
+              bValue = bProfile?.company_name?.toLowerCase() || "";
+              break;
+            case "website_url":
+              aValue = aProfile?.website_url?.toLowerCase() || "";
+              bValue = bProfile?.website_url?.toLowerCase() || "";
+              break;
+            case "total_money_spent":
+              aValue = aProfile?.total_money_spent || 0;
+              bValue = bProfile?.total_money_spent || 0;
+              break;
+            case "total_contests_run":
+              aValue = aProfile?.total_contests_run || 0;
+              bValue = bProfile?.total_contests_run || 0;
+              break;
+            case "available_deposit_balance":
+              aValue = aProfile?.available_deposit_balance || 0;
+              bValue = bProfile?.available_deposit_balance || 0;
+              break;
+            case "withdrawable_balance":
+              aValue = aProfile?.withdrawable_balance || 0;
+              bValue = bProfile?.withdrawable_balance || 0;
+              break;
+            case "subscription_info":
+              aValue = getSubscriptionPlanName(aProfile?.subscription_info);
+              bValue = getSubscriptionPlanName(bProfile?.subscription_info);
+              break;
+            case "created_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aCreatedDateAdv = a.created_at
+                ? new Date(a.created_at)
+                : null;
+              const bCreatedDateAdv = b.created_at
+                ? new Date(b.created_at)
+                : null;
+              aValue =
+                aCreatedDateAdv && !isNaN(aCreatedDateAdv.getTime())
+                  ? aCreatedDateAdv.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bCreatedDateAdv && !isNaN(bCreatedDateAdv.getTime())
+                  ? bCreatedDateAdv.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            case "updated_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aUpdatedDateAdv = a.updated_at
+                ? new Date(a.updated_at)
+                : null;
+              const bUpdatedDateAdv = b.updated_at
+                ? new Date(b.updated_at)
+                : null;
+              aValue =
+                aUpdatedDateAdv && !isNaN(aUpdatedDateAdv.getTime())
+                  ? aUpdatedDateAdv.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bUpdatedDateAdv && !isNaN(bUpdatedDateAdv.getTime())
+                  ? bUpdatedDateAdv.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            default:
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+          }
+
+          // Handle numeric vs string comparison
+          if (typeof aValue === "number" && typeof bValue === "number") {
+            return sortOrder === "asc" ? aValue - bValue : bValue - aValue;
+          } else {
+            if (sortOrder === "asc") {
+              return String(aValue).localeCompare(String(bValue));
+            } else {
+              return String(bValue).localeCompare(String(aValue));
+            }
+          }
+        });
+      } else if (sortOrder) {
+        // Fallback to full_name sorting if no column specified
+        filtered = [...filtered].sort((a, b) => {
+          const aValue = a.full_name?.toLowerCase() || "";
+          const bValue = b.full_name?.toLowerCase() || "";
+
+          if (sortOrder === "asc") {
+            return aValue.localeCompare(bValue);
+          } else {
+            return bValue.localeCompare(aValue);
+          }
+        });
+      }
+    } else if (activeTab === "creators") {
+      if (sortOrder && sortColumn) {
+        filtered = [...filtered].sort((a, b) => {
+          let aValue: any;
+          let bValue: any;
+
+          // Get creator profiles
+          const aProfile = Array.isArray(a.creator_profiles)
+            ? a.creator_profiles.length > 0
+              ? a.creator_profiles[0]
+              : null
+            : a.creator_profiles || null;
+          const bProfile = Array.isArray(b.creator_profiles)
+            ? b.creator_profiles.length > 0
+              ? b.creator_profiles[0]
+              : null
+            : b.creator_profiles || null;
+
+          const getJoined = (value: any): string => {
+            if (!value) return "";
+            if (Array.isArray(value)) return value.join(", ").toLowerCase();
+            if (typeof value === "string") return value.toLowerCase();
+            try {
+              return JSON.stringify(value).toLowerCase();
+            } catch {
+              return String(value).toLowerCase();
+            }
+          };
+
+          // Get values based on sort column
+          switch (sortColumn) {
+            case "id":
+              aValue = a.id || "";
+              bValue = b.id || "";
+              break;
+            case "full_name":
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+              break;
+            case "email":
+              aValue = a.email?.toLowerCase() || "";
+              bValue = b.email?.toLowerCase() || "";
+              break;
+            case "username": {
+              const aMeta = getUsernameSortMeta(a.username);
+              const bMeta = getUsernameSortMeta(b.username);
+
+              const mapUsernameRankForOrder = (rank: number) => {
+                if (sortOrder === "asc") return rank;
+                if (rank === 0) return 1;
+                if (rank === 1) return 0;
+                return 2;
+              };
+
+              const aRank = mapUsernameRankForOrder(aMeta.rank);
+              const bRank = mapUsernameRankForOrder(bMeta.rank);
+
+              if (aRank !== bRank) {
+                return aRank - bRank;
+              }
+
+              const cmp = aMeta.value.localeCompare(bMeta.value);
+              if (cmp !== 0) {
+                return sortOrder === "asc" ? cmp : -cmp;
+              }
+
+              return 0;
+            }
+            case "youtube_account": {
+              const getYtName = (profile: CreatorProfile | null) => {
+                const yt = profile?.youtube_account;
+                if (!yt) return "";
+                try {
+                  const account = typeof yt === "string" ? JSON.parse(yt) : yt;
+                  return (
+                    account?.channel_title?.toLowerCase() ||
+                    account?.channel_custom_url?.toLowerCase() ||
+                    ""
+                  );
+                } catch {
+                  return "";
+                }
+              };
+
+              const aName = getYtName(aProfile);
+              const bName = getYtName(bProfile);
+
+              // Null / empty should be last for both ascending and descending.
+              const aEmpty = !aName;
+              const bEmpty = !bName;
+
+              if (aEmpty !== bEmpty) {
+                // non-empty (false) comes before empty (true)
+                return aEmpty ? 1 : -1;
+              }
+
+              if (!aEmpty && !bEmpty) {
+                const cmp = aName.localeCompare(bName);
+                if (cmp !== 0) {
+                  return sortOrder === "asc" ? cmp : -cmp;
+                }
+              }
+
+              return 0;
+            }
+            case "instagram_account": {
+              const getIgName = (profile: CreatorProfile | null) => {
+                const ig = profile?.instagram_account;
+                if (!ig) return "";
+                try {
+                  const account = typeof ig === "string" ? JSON.parse(ig) : ig;
+                  const rawName =
+                    account?.name_of_account || account?.username || "";
+                  return normalizeForAlphabetSort(rawName);
+                } catch {
+                  return "";
+                }
+              };
+
+              const aName = getIgName(aProfile);
+              const bName = getIgName(bProfile);
+
+              // Null / empty should be last for both ascending and descending.
+              const aEmpty = !aName;
+              const bEmpty = !bName;
+
+              if (aEmpty !== bEmpty) {
+                // non-empty (false) comes before empty (true)
+                return aEmpty ? 1 : -1;
+              }
+
+              if (!aEmpty && !bEmpty) {
+                const cmp = aName.localeCompare(bName);
+                if (cmp !== 0) {
+                  return sortOrder === "asc" ? cmp : -cmp;
+                }
+              }
+
+              return 0;
+            }
+            case "tiktok_account": {
+              const getTtName = (profile: CreatorProfile | null) => {
+                const tt = profile?.tiktok_account;
+                if (!tt) return "";
+                try {
+                  const account = typeof tt === "string" ? JSON.parse(tt) : tt;
+                  const rawName =
+                    account?.display_name || account?.username || "";
+                  return normalizeForAlphabetSort(rawName);
+                } catch {
+                  return "";
+                }
+              };
+
+              const aName = getTtName(aProfile);
+              const bName = getTtName(bProfile);
+
+              const aEmpty = !aName;
+              const bEmpty = !bName;
+
+              if (aEmpty !== bEmpty) {
+                return aEmpty ? 1 : -1;
+              }
+
+              if (!aEmpty && !bEmpty) {
+                const cmp = aName.localeCompare(bName);
+                if (cmp !== 0) {
+                  return sortOrder === "asc" ? cmp : -cmp;
+                }
+              }
+
+              return 0;
+            }
+            case "twitter_account": {
+              const getTwName = (profile: CreatorProfile | null) => {
+                const tw = profile?.twitter_account;
+                if (!tw) return "";
+                try {
+                  const account = typeof tw === "string" ? JSON.parse(tw) : tw;
+                  const rawName = account?.name || account?.username || "";
+                  return normalizeForAlphabetSort(rawName);
+                } catch {
+                  return "";
+                }
+              };
+
+              const aName = getTwName(aProfile);
+              const bName = getTwName(bProfile);
+
+              const aEmpty = !aName;
+              const bEmpty = !bName;
+
+              if (aEmpty !== bEmpty) {
+                return aEmpty ? 1 : -1;
+              }
+
+              if (!aEmpty && !bEmpty) {
+                const cmp = aName.localeCompare(bName);
+                if (cmp !== 0) {
+                  return sortOrder === "asc" ? cmp : -cmp;
+                }
+              }
+
+              return 0;
+            }
+            case "contests_participated":
+              aValue = aProfile?.total_contests_participated || 0;
+              bValue = bProfile?.total_contests_participated || 0;
+              break;
+            case "contests_won":
+              aValue = aProfile?.total_contests_won || 0;
+              bValue = bProfile?.total_contests_won || 0;
+              break;
+            case "total_views":
+              aValue = aProfile?.total_views || 0;
+              bValue = bProfile?.total_views || 0;
+              break;
+            case "total_money_won":
+              aValue = aProfile?.total_money_won || 0;
+              bValue = bProfile?.total_money_won || 0;
+              break;
+            case "withdrawable_balance":
+              aValue = aProfile?.withdrawable_balance || 0;
+              bValue = bProfile?.withdrawable_balance || 0;
+              break;
+            case "total_submissions_made":
+              aValue = aProfile?.total_submissions_made || 0;
+              bValue = bProfile?.total_submissions_made || 0;
+              break;
+            case "total_submissions_won":
+              aValue = aProfile?.total_submissions_won || 0;
+              bValue = bProfile?.total_submissions_won || 0;
+              break;
+            case "total_reels":
+            case "trust_score":
+            case "trust_number":
+            case "pending_reels":
+            case "rejected_reels":
+            case "verified_reels": {
+              const getVal = (profile: CreatorProfile | null) => {
+                const m = profile?.trust_score_metrics;
+                if (!m) return sortColumn === "trust_score" ? 100 : 0;
+                try {
+                  const parsed = typeof m === "string" ? JSON.parse(m) : m;
+                  const val = parsed?.[sortColumn];
+                  if (val === null || val === undefined) return sortColumn === "trust_score" ? 100 : 0;
+                  return Number(val);
+                } catch {
+                  return sortColumn === "trust_score" ? 100 : 0;
+                }
+              };
+              aValue = getVal(aProfile);
+              bValue = getVal(bProfile);
+              break;
+            }
+            case "avg_quality_score":
+              aValue = aProfile?.avg_quality_score ? Number(aProfile.avg_quality_score) : 0;
+              bValue = bProfile?.avg_quality_score ? Number(bProfile.avg_quality_score) : 0;
+              break;
+            case "best_quality_score":
+              aValue = aProfile?.best_quality_score ?? 0;
+              bValue = bProfile?.best_quality_score ?? 0;
+              break;
+            case "quality_score_sum":
+              aValue = aProfile?.quality_score_sum ? Number(aProfile.quality_score_sum) : 0;
+              bValue = bProfile?.quality_score_sum ? Number(bProfile.quality_score_sum) : 0;
+              break;
+            case "scored_verified_count":
+              aValue = aProfile?.scored_verified_count ?? 0;
+              bValue = bProfile?.scored_verified_count ?? 0;
+              break;
+            case "quality_score_counts": {
+              const getTotalCounts = (counts: any) => {
+                if (!counts) return 0;
+                try {
+                  const c = typeof counts === "string" ? JSON.parse(counts) : counts;
+                  return (c?.score1 ?? 0) + (c?.score2 ?? 0) + (c?.score3 ?? 0) + (c?.score4 ?? 0) + (c?.score5 ?? 0);
+                } catch {
+                  return 0;
+                }
+              };
+              aValue = getTotalCounts(aProfile?.quality_score_counts);
+              bValue = getTotalCounts(bProfile?.quality_score_counts);
+              break;
+            }
+            case "date_of_birth":
+              // Convert dates to timestamps for proper chronological sorting
+              // Use Number.MAX_SAFE_INTEGER as sentinel for empty dates to ensure they sort last
+              const aDate = aProfile?.date_of_birth
+                ? new Date(aProfile.date_of_birth)
+                : null;
+              const bDate = bProfile?.date_of_birth
+                ? new Date(bProfile.date_of_birth)
+                : null;
+              aValue =
+                aDate && !isNaN(aDate.getTime())
+                  ? aDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bDate && !isNaN(bDate.getTime())
+                  ? bDate.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            case "gender":
+              aValue = aProfile?.gender?.toLowerCase() || "";
+              bValue = bProfile?.gender?.toLowerCase() || "";
+              break;
+            case "country":
+              aValue = getGeoField(a, "country")?.toLowerCase() || "";
+              bValue = getGeoField(b, "country")?.toLowerCase() || "";
+              break;
+            case "state":
+              aValue = getGeoField(a, "state")?.toLowerCase() || "";
+              bValue = getGeoField(b, "state")?.toLowerCase() || "";
+              break;
+            case "city":
+              aValue = getGeoField(a, "city")?.toLowerCase() || "";
+              bValue = getGeoField(b, "city")?.toLowerCase() || "";
+              break;
+            case "address":
+              aValue = aProfile?.address?.toLowerCase() || "";
+              bValue = bProfile?.address?.toLowerCase() || "";
+              break;
+            case "language":
+              aValue = getJoined(aProfile?.languages);
+              bValue = getJoined(bProfile?.languages);
+              break;
+            case "categories":
+              aValue = getJoined(aProfile?.categories);
+              bValue = getJoined(bProfile?.categories);
+              break;
+            case "subcategories":
+              aValue = getJoined(aProfile?.subcategories);
+              bValue = getJoined(bProfile?.subcategories);
+              break;
+            case "interests":
+              aValue = getJoined(aProfile?.interests);
+              bValue = getJoined(bProfile?.interests);
+              break;
+            case "created_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aCreatedDateCreator = a.created_at
+                ? new Date(a.created_at)
+                : null;
+              const bCreatedDateCreator = b.created_at
+                ? new Date(b.created_at)
+                : null;
+              aValue =
+                aCreatedDateCreator && !isNaN(aCreatedDateCreator.getTime())
+                  ? aCreatedDateCreator.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bCreatedDateCreator && !isNaN(bCreatedDateCreator.getTime())
+                  ? bCreatedDateCreator.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            case "updated_at":
+              // Convert dates to timestamps for proper chronological sorting
+              const aUpdatedDateCreator = a.updated_at
+                ? new Date(a.updated_at)
+                : null;
+              const bUpdatedDateCreator = b.updated_at
+                ? new Date(b.updated_at)
+                : null;
+              aValue =
+                aUpdatedDateCreator && !isNaN(aUpdatedDateCreator.getTime())
+                  ? aUpdatedDateCreator.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              bValue =
+                bUpdatedDateCreator && !isNaN(bUpdatedDateCreator.getTime())
+                  ? bUpdatedDateCreator.getTime()
+                  : Number.MAX_SAFE_INTEGER;
+              break;
+            default:
+              aValue = a.full_name?.toLowerCase() || "";
+              bValue = b.full_name?.toLowerCase() || "";
+          }
+
+          // Columns where null/empty should always be last
+          const nullsLastColumns = [
+            "date_of_birth",
+            "gender",
+            "country",
+            "state",
+            "city",
+            "address",
+            "language",
+            "categories",
+            "subcategories",
+            "interests",
+            "created_at",
+            "updated_at",
+          ];
+
+          if (nullsLastColumns.includes(sortColumn)) {
+            // Check if values are empty/null
+            const aEmpty =
+              typeof aValue === "number"
+                ? aValue === Number.MAX_SAFE_INTEGER
+                : !aValue || String(aValue).trim() === "";
+            const bEmpty =
+              typeof bValue === "number"
+                ? bValue === Number.MAX_SAFE_INTEGER // For date_of_birth, MAX_SAFE_INTEGER means empty
+                : !bValue || String(bValue).trim() === "";
+
+            // If both are empty, they are equal
+            if (aEmpty && bEmpty) {
+              return 0;
+            }
+
+            // If only one is empty, it goes to the end (regardless of sort order)
+            if (aEmpty !== bEmpty) {
+              // non-empty (false) comes before empty (true)
+              return aEmpty ? 1 : -1;
+            }
+
+            // If neither is empty, proceed with normal comparison
+          }
+
+          // Handle numeric vs string comparison
+          if (typeof aValue === "number" && typeof bValue === "number") {
+            return sortOrder === "asc" ? aValue - bValue : bValue - aValue;
+          } else {
+            if (sortOrder === "asc") {
+              return String(aValue).localeCompare(String(bValue));
+            } else {
+              return String(bValue).localeCompare(String(aValue));
+            }
+          }
+        });
+      } else if (sortOrder) {
+        // Fallback to full_name sorting if no column specified
+        filtered = [...filtered].sort((a, b) => {
+          const aValue = a.full_name?.toLowerCase() || "";
+          const bValue = b.full_name?.toLowerCase() || "";
+
+          if (sortOrder === "asc") {
+            return aValue.localeCompare(bValue);
+          } else {
+            return bValue.localeCompare(aValue);
+          }
+        });
+      }
+    }
+
+    // Apply filters
+    if (filters.length > 0) {
+      const doesFilterMatch = (row: User, filter: FilterType): boolean => {
+        if (!filter.value.trim()) return true; // Skip empty filters
+
+        const columnValue = getColumnValue(row, filter.column);
+        const rawFilterValue = filter.value.trim();
+        const filterValue = rawFilterValue.toLowerCase();
+
+        // Special handling for quality_score_counts to perform numeric/operator checks on nested keys
+        if (filter.column === "quality_score_counts") {
+          if (columnValue) {
+            try {
+              const parsed = typeof columnValue === "string" ? JSON.parse(columnValue) : columnValue;
+              const numericFilter = Number(rawFilterValue);
+              if (Number.isNaN(numericFilter)) return false;
+              const operator = filter.operator || "=";
+
+              const vals = [
+                Number(parsed?.score1 ?? 0),
+                Number(parsed?.score2 ?? 0),
+                Number(parsed?.score3 ?? 0),
+                Number(parsed?.score4 ?? 0),
+                Number(parsed?.score5 ?? 0),
+              ];
+
+              return vals.some(val => {
+                switch (operator) {
+                  case ">": return val > numericFilter;
+                  case "<": return val < numericFilter;
+                  case ">=": return val >= numericFilter;
+                  case "<=": return val <= numericFilter;
+                  case "!=": return val !== numericFilter;
+                  default: return val === numericFilter;
+                }
+              });
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        }
+
+        // Exact numeric match for integer count columns (e.g. total_submissions_won)
+        // Also supports comparison operators for rankings and other integer fields
+        const integerCountColumns = [
+          "coins",
+          "advertisers_referred",
+          "creators_referred",
+          "total_lifetime_coins",
+          "total_contests_run",
+          "contests_participated",
+          "contests_won",
+          "total_views",
+          "total_submissions_made",
+          "total_submissions_won",
+          "trust_score",
+          "avg_quality_score",
+          "best_quality_score",
+          "quality_score_sum",
+          "scored_verified_count",
+          "total_reels",
+          "trust_number",
+          "pending_reels",
+          "rejected_reels",
+          "verified_reels",
+          // Add "rankings" here when the field is available
+        ];
+
+        // Fields that support comparison operators via dropdown
+        const integerComparisonColumns = [
+          "coins",
+          "advertisers_referred",
+          "creators_referred",
+          "total_lifetime_coins",
+          "total_contests_run",
+          "contests_participated",
+          "contests_won",
+          "total_views",
+          "total_submissions_made",
+          "total_submissions_won",
+          "trust_score",
+          "avg_quality_score",
+          "best_quality_score",
+          "quality_score_sum",
+          "scored_verified_count",
+          "total_reels",
+          "trust_number",
+          "pending_reels",
+          "rejected_reels",
+          "verified_reels",
+          // Add "rankings" here when the field is available
+        ];
+
+        // Check integer columns first, before null check
+        if (integerCountColumns.includes(filter.column)) {
+          // For integer columns, treat null/undefined as 0
+          const numericColumn = Number(columnValue ?? 0);
+          if (!Number.isNaN(numericColumn)) {
+            const numericFilter = Number(rawFilterValue);
+            if (Number.isNaN(numericFilter)) return false;
+
+            // Use operator from filter state if available, otherwise fallback to parsing from value
+            const operator = filter.operator || "=";
+
+            if (
+              integerComparisonColumns.includes(filter.column) &&
+              operator !== "="
+            ) {
+              switch (operator) {
+                case ">":
+                  return numericColumn > numericFilter;
+                case "<":
+                  return numericColumn < numericFilter;
+                case ">=":
+                  return numericColumn >= numericFilter;
+                case "<=":
+                  return numericColumn <= numericFilter;
+                case "!=":
+                  return numericColumn !== numericFilter;
+                default:
+                  return numericColumn === numericFilter;
+              }
+            }
+
+            // Fallback to exact match
+            return numericColumn === numericFilter;
+          }
+          // If conversion to number fails, return false
+          return false;
+        }
+
+        // Handle different data types for non-integer columns
+        if (columnValue === null || columnValue === undefined) {
+          return false;
+        }
+
+        let columnValueForFiltering: any = columnValue;
+
+        // Special handling for monetary fields that are stored in cents but displayed in dollars
+        const centBasedMoneyColumns = [
+          "total_money_spent",
+          "available_deposit_balance",
+          "withdrawable_balance",
+          "total_money_won",
+          "affiliate_earnings",
+          "other_earnings",
+        ];
+
+        // Fields that support comparison operators via dropdown
+        // For earnings and money fields: values are in dollars (e.g., ">100", "<50", ">=200", "<=10")
+        const moneyComparisonColumns = [
+          "affiliate_earnings",
+          "other_earnings",
+          "total_money_spent",
+          "available_deposit_balance",
+          "withdrawable_balance",
+          "total_money_won",
+        ];
+
+        if (centBasedMoneyColumns.includes(filter.column)) {
+          const numericColumn = Number(columnValue);
+          if (!Number.isNaN(numericColumn)) {
+            const columnValueInDollars = numericColumn / 100;
+
+            // Check if this field supports comparison operators
+            if (moneyComparisonColumns.includes(filter.column)) {
+              const numericFilter = parseFloat(rawFilterValue);
+              if (Number.isNaN(numericFilter)) return false;
+
+              // Use operator from filter state if available, otherwise fallback to parsing from value
+              const operator = filter.operator || "=";
+
+              if (operator !== "=") {
+                switch (operator) {
+                  case ">":
+                    return columnValueInDollars > numericFilter;
+                  case "<":
+                    return columnValueInDollars < numericFilter;
+                  case ">=":
+                    return columnValueInDollars >= numericFilter;
+                  case "<=":
+                    return columnValueInDollars <= numericFilter;
+                  case "!=":
+                    return columnValueInDollars !== numericFilter;
+                  default:
+                    return columnValueInDollars === numericFilter;
+                }
+              }
+            }
+
+            // Convert cents to a fixed 2-decimal dollar string (e.g. 246 -> "2.46")
+            columnValueForFiltering = columnValueInDollars.toFixed(2);
+
+            const columnValueStr = String(
+              columnValueForFiltering,
+            ).toLowerCase();
+
+            // For money columns, use prefix match so typing "4" only matches values like "4.00", "40.00", "4.50", etc.
+            return columnValueStr.startsWith(filterValue);
+          }
+        }
+
+        // Special handling for date fields with comparison operators
+        const dateFields = ["created_at", "updated_at", "date_of_birth"];
+        if (dateFields.includes(filter.column)) {
+          const columnDate = columnValue
+            ? new Date(columnValue as string)
+            : null;
+          if (!columnDate || isNaN(columnDate.getTime())) return false;
+
+          // Parse the filter date value
+          const filterDate = new Date(rawFilterValue);
+          if (isNaN(filterDate.getTime())) return false;
+
+          // Use operator from filter state if available, otherwise fallback to "="
+          const operator = filter.operator || "=";
+
+          // For all date fields, compare only date part (ignore time)
+          const colDateOnly = new Date(
+            columnDate.getFullYear(),
+            columnDate.getMonth(),
+            columnDate.getDate(),
+          );
+          const filterDateOnly = new Date(
+            filterDate.getFullYear(),
+            filterDate.getMonth(),
+            filterDate.getDate(),
+          );
+
+          switch (operator) {
+            case ">":
+              return colDateOnly > filterDateOnly;
+            case "<":
+              return colDateOnly < filterDateOnly;
+            case ">=":
+              return colDateOnly >= filterDateOnly;
+            case "<=":
+              return colDateOnly <= filterDateOnly;
+            case "!=":
+              return colDateOnly.getTime() !== filterDateOnly.getTime();
+            default:
+              return colDateOnly.getTime() === filterDateOnly.getTime();
+          }
+        }
+
+        // Special handling for subscription_info: filter by plan name using helper
+        if (filter.column === "subscription_info") {
+          const planName = (() => {
+            if (!columnValue) return "";
+            try {
+              const info =
+                typeof columnValue === "string"
+                  ? JSON.parse(columnValue)
+                  : columnValue;
+
+              if (!info?.product_id) return "";
+              const plan = getSubscriptionPlanById(info.product_id);
+              return (
+                plan?.displayName?.toLowerCase() ||
+                plan?.name?.toLowerCase() ||
+                ""
+              );
+            } catch {
+              return "";
+            }
+          })();
+
+          if (!planName) return false;
+          return planName.includes(filterValue);
+        }
+
+        const columnValueStr = String(columnValueForFiltering).toLowerCase();
+
+        // Perform search (contains match) for non-money columns
+        return columnValueStr.includes(filterValue);
+      };
+
+      // Group filters by column - filters on the same column use OR logic, different columns use AND logic
+      const filtersByColumn = filters.reduce(
+        (acc, filter) => {
+          if (!filter.value.trim()) return acc; // Skip empty filters
+          if (!acc[filter.column]) {
+            acc[filter.column] = [];
+          }
+          acc[filter.column].push(filter);
+          return acc;
+        },
+        {} as Record<string, FilterType[]>,
+      );
+
+      filtered = filtered.filter((row) => {
+        // For each column group, at least one filter must match (OR logic)
+        // Across different columns, all column groups must match (AND logic)
+        return Object.values(filtersByColumn).every((columnFilters) => {
+          // At least one filter in this column group must match
+          return columnFilters.some((filter) => doesFilterMatch(row, filter));
+        });
+      });
+    }
+
+    return filtered;
+  }, [rows, activeTab, sortOrder, sortColumn, filters]);
+
+  // Calculate counts for each tab
+  const allUsersCount = userCounts.all || rows.length;
+  const advertisersCount =
+    userCounts.advertisers ||
+    rows.filter((r) => r.user_type === "advertiser").length;
+  const creatorsCount =
+    userCounts.creators || rows.filter((r) => r.user_type === "creator").length;
+
+  // Paginated data
+  const paginatedData = useMemo(() => {
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    return tabFiltered.slice(start, end);
+  }, [tabFiltered, page, limit]);
+
+  const totalPages = Math.ceil(tabFiltered.length / limit);
+  const hasNextPage = page < totalPages;
+  const hasPreviousPage = page > 1;
+
+  const notificationSelection =
+    useMemo((): NotificationSelectionState | null => {
+      if (selectAllFiltered && tabFiltered.length > 0) {
+        const users = tabFiltered.map(userToRecipientRow);
+        return {
+          mode: "select_all_filtered",
+          userIds: users.map((u) => u.id),
+          users,
+          filterSnapshot: {
+            activeTab: activeTab as "all" | "advertisers" | "creators",
+            isActive: true,
+            filters: filters
+              .filter((f) => f.value.trim())
+              .map((f) => ({
+                column: f.column,
+                value: f.value,
+                operator: f.operator,
+              })),
+          },
+          label: `All users matching current filters (${tabFiltered.length})`,
+        };
+      }
+      if (selectedUserIds.size === 0) return null;
+      const usersFromTab = tabFiltered
+        .filter((u) => selectedUserIds.has(u.id))
+        .map(userToRecipientRow);
+      const allSelected = rows
+        .filter((u) => selectedUserIds.has(u.id))
+        .map(userToRecipientRow);
+      const mergedUsers =
+        usersFromTab.length >= selectedUserIds.size
+          ? usersFromTab
+          : allSelected.length > 0
+            ? allSelected
+            : usersFromTab;
+      const ids = [...selectedUserIds];
+      return {
+        mode: "selected_user_ids",
+        userIds: ids,
+        users: mergedUsers,
+        filterSnapshot: { isActive: true },
+        label: "Hand-picked selection",
+      };
+    }, [
+      selectAllFiltered,
+      tabFiltered,
+      selectedUserIds,
+      activeTab,
+      filters,
+      rows,
+    ]);
+
+  const hasNotificationSelection =
+    selectAllFiltered || selectedUserIds.size > 0;
+
+  const toggleUserSelection = (userId: string, checked: boolean) => {
+    setSelectAllFiltered(false);
+    setSelectedUserIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(userId);
+      else next.delete(userId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllFiltered = (checked: boolean) => {
+    setSelectAllFiltered(checked);
+    if (checked) setSelectedUserIds(new Set());
+  };
+
+  const headerSelectChecked: boolean | "indeterminate" = selectAllFiltered
+    ? true
+    : selectedUserIds.size > 0
+      ? "indeterminate"
+      : false;
+
+  const selectedCount = selectAllFiltered
+    ? tabFiltered.length
+    : selectedUserIds.size;
+
+  const selectionCheckboxClass = cn(
+    "relative z-10 shrink-0",
+    isDark
+      ? "border-gray-500 bg-[#170337] data-[state=checked]:bg-purple-600 data-[state=checked]:text-white"
+      : "border-gray-300 bg-white data-[state=checked]:bg-purple-600",
+  );
+
+  // Markers for map view (users in current tab with lat/lon)
+  const mapMarkers = useMemo(() => {
+    return tabFiltered
+      .map((u) => {
+        const coords = getGeoCoords(u);
+        if (!coords) return null;
+        const g = u.geo_data as any;
+        const city = g?.city ?? g?.geo_data?.city;
+        const state = g?.state ?? g?.geo_data?.state;
+        const country = g?.country ?? g?.geo_data?.country;
+        const cp = Array.isArray(u.creator_profiles)
+          ? u.creator_profiles[0]
+          : u.creator_profiles;
+        let youtube: { label: string; url: string | null } | null = null;
+        let instagram: { label: string; url: string | null } | null = null;
+        let tiktok: { label: string; url: string | null } | null = null;
+        let twitter: { label: string; url: string | null } | null = null;
+        if (cp) {
+          try {
+            const y =
+              typeof cp.youtube_account === "string"
+                ? JSON.parse(cp.youtube_account)
+                : cp.youtube_account;
+            if (y) {
+              const handle = y.channel_custom_url?.replace(/^@/, "").trim();
+              youtube = {
+                label: y.channel_title || y.channel_custom_url || "YouTube",
+                url: handle
+                  ? `https://www.youtube.com/@${handle}`
+                  : y.channel_id
+                    ? `https://www.youtube.com/channel/${y.channel_id}`
+                    : null,
+              };
+            }
+          } catch {}
+          try {
+            const i =
+              typeof cp.instagram_account === "string"
+                ? JSON.parse(cp.instagram_account)
+                : cp.instagram_account;
+            if (i && (i.username || i.name_of_account)) {
+              instagram = {
+                label: i.name_of_account || i.username || "Instagram",
+                url: i.username
+                  ? `https://instagram.com/${i.username.replace(/^@/, "")}`
+                  : null,
+              };
+            }
+          } catch {}
+          try {
+            const tt =
+              typeof cp.tiktok_account === "string"
+                ? JSON.parse(cp.tiktok_account)
+                : cp.tiktok_account;
+            if (tt && (tt.username || tt.display_name)) {
+              tiktok = {
+                label: tt.display_name || tt.username || "TikTok",
+                url: tt.username
+                  ? `https://tiktok.com/@${tt.username.replace(/^@/, "")}`
+                  : null,
+              };
+            }
+          } catch {}
+          try {
+            const t =
+              typeof cp.twitter_account === "string"
+                ? JSON.parse(cp.twitter_account)
+                : cp.twitter_account;
+            if (t && (t.username || t.name)) {
+              twitter = {
+                label: t.name || t.username || "Twitter",
+                url: t.username
+                  ? `https://twitter.com/${t.username.replace(/^@/, "")}`
+                  : null,
+              };
+            }
+          } catch {}
+        }
+        return {
+          lat: coords.lat,
+          lon: coords.lon,
+          id: u.id,
+          full_name: u.full_name,
+          email: u.email,
+          user_type: u.user_type,
+          username: u.username ?? null,
+          profile_picture_url: u.profile_picture_url ?? null,
+          city,
+          state,
+          country,
+          youtube,
+          instagram,
+          tiktok,
+          twitter,
+        };
+      })
+      .filter(Boolean) as {
+      lat: number;
+      lon: number;
+      id: string;
+      full_name: string;
+      email: string;
+      user_type: string;
+      username?: string | null;
+      profile_picture_url?: string | null;
+      city?: string;
+      state?: string;
+      country?: string;
+      youtube?: { label: string; url: string | null } | null;
+      instagram?: { label: string; url: string | null } | null;
+      tiktok?: { label: string; url: string | null } | null;
+      twitter?: { label: string; url: string | null } | null;
+    }[];
+  }, [tabFiltered]);
+
+  useEffect(() => {
+    setPage(1);
+    setFilters([]);
+    setEmptyFilterColumn("");
+    setEmptyFilterValue("");
+  }, [activeTab]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [filters]);
+
+  const load = async () => {
+    usersLoadAbortRef.current?.abort();
+    const generation = ++usersLoadGenerationRef.current;
+    const abort = new AbortController();
+    usersLoadAbortRef.current = abort;
+
+    const isStale = () => generation !== usersLoadGenerationRef.current;
+    let initialBatchLoaded = false;
+
+    setLoading(true);
+    setBackgroundLoading(false);
+    setInitialLoadDone(false);
+    setUsersLoadError(false);
+    setUsersBackgroundLoadError(false);
+    setRows([]);
+
+    const mergeUsers = (incoming: User[]) => {
+      if (isStale()) return;
+      setRows((prev) => {
+        const byId = new Map(prev.map((user) => [user.id, user]));
+        for (const user of incoming) {
+          byId.set(user.id, user);
+        }
+        return Array.from(byId.values()).sort(
+          (a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        );
+      });
+    };
+
+    try {
+      const firstRes = await fetch(
+        `/api/admin/users?offset=0&limit=${USERS_INITIAL_LIMIT}&includeCounts=1`,
+        { signal: abort.signal },
+      );
+      if (isStale() || abort.signal.aborted) return;
+
+      const firstJson = await firstRes.json();
+      if (!firstRes.ok) {
+        throw new Error(firstJson.error || "Failed to fetch");
+      }
+
+      setRows(firstJson.items ?? []);
+      initialBatchLoaded = true;
+      if (firstJson.counts) {
+        setUserCounts(firstJson.counts);
+      }
+
+      const total = firstJson.total ?? firstJson.items?.length ?? 0;
+      setLoading(false);
+      setInitialLoadDone(true);
+
+      if (total <= USERS_INITIAL_LIMIT) return;
+
+      setBackgroundLoading(true);
+      let offset = USERS_INITIAL_LIMIT;
+
+      while (offset < total) {
+        if (abort.signal.aborted || isStale()) return;
+
+        const res = await fetch(
+          `/api/admin/users?offset=${offset}&limit=${USERS_BACKGROUND_CHUNK}`,
+          { signal: abort.signal },
+        );
+        if (isStale() || abort.signal.aborted) return;
+
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(json.error || "Failed to fetch users");
+        }
+
+        const batch: User[] = json.items ?? [];
+        if (batch.length === 0) break;
+
+        mergeUsers(batch);
+        offset += batch.length;
+        if (batch.length < USERS_BACKGROUND_CHUNK) break;
+      }
+    } catch (e) {
+      if (abort.signal.aborted || isStale()) return;
+      console.error("Error loading users:", e);
+      if (initialBatchLoaded) {
+        setUsersBackgroundLoadError(true);
+      } else {
+        setUsersLoadError(true);
+      }
+      setInitialLoadDone(true);
+    } finally {
+      if (abort.signal.aborted || isStale()) return;
+      setLoading(false);
+      setBackgroundLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    return () => {
+      usersLoadAbortRef.current?.abort();
+    };
+  }, []);
+
+  // Watch for theme changes from parent layout
+  useEffect(() => {
+    const checkTheme = () => {
+      const modeElement = document.querySelector("[data-mode]");
+      if (modeElement) {
+        const currentMode = modeElement.getAttribute("data-mode");
+        const newIsDark = currentMode === "dark";
+        if (newIsDark !== isDark) {
+          setIsDark(newIsDark);
+        }
+      }
+    };
+
+    checkTheme();
+
+    // Watch for changes in the data attribute
+    const observer = new MutationObserver(checkTheme);
+    const targetNode = document.querySelector("[data-mode]");
+    if (targetNode) {
+      observer.observe(targetNode, {
+        attributes: true,
+        attributeFilter: ["data-mode"],
+      });
+    }
+
+    return () => observer.disconnect();
+  }, [isDark]);
+
+  return (
+    <div className="space-y-6">
+      <Card
+        className={cn(
+          "rounded-2xl border shadow-sm",
+          isDark ? "border-white/10 bg-[#020817]" : "border-slate-200/80 bg-white",
+        )}
+      >
+        <CardHeader className="space-y-4 px-3 py-4 sm:px-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle
+                className={cn(
+                  "shrink-0 text-xl font-semibold tracking-tight sm:text-2xl",
+                  isDark ? "text-white" : "text-black",
+                )}
+              >
+                Users Management
+              </CardTitle>
+              <p
+                className={cn(
+                  "mt-1 text-sm",
+                  isDark ? "text-slate-400" : "text-slate-500",
+                )}
+              >
+                Manage audiences, outreach, and geographic insights.
+              </p>
+            </div>
+            {/* {backgroundLoading && (
+              <Badge
+                variant="outline"
+                className={cn(
+                  "shrink-0 text-xs font-normal gap-1",
+                  isDark
+                    ? "border-purple-700/50 text-purple-200"
+                    : "border-purple-200 text-purple-700",
+                )}
+              >
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Loading users {rows.length.toLocaleString()}
+                {allUsersCount > 0
+                  ? ` / ${allUsersCount.toLocaleString()}`
+                  : ""}
+              </Badge>
+            )} */}
+            {viewMode === "table" && (
+              <div className="flex shrink-0 items-center gap-2">
+                {!emailLeadSelectMode && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5 px-2 sm:px-3"
+                    disabled={!hasNotificationSelection}
+                    onClick={() => {
+                      setWarmupSelectMode(false);
+                      sessionStorage.removeItem("wu_mode");
+                      setBundlesModalVariant("bundle");
+                      setBundlesModalDefaultTab("select");
+                      setEmailBundlesModalOpen(true);
+                    }}
+                  >
+                    <Layers className="h-4 w-4" />
+                    <span className="hidden sm:inline">Select bundle</span>
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  className="h-8 gap-1.5 px-2 sm:px-3"
+                  disabled={!hasNotificationSelection}
+                  onClick={() => setEmailSendModalOpen(true)}
+                >
+                  <Mail className="h-4 w-4" />
+                  <span className="hidden sm:inline">
+                    {emailLeadSelectMode ? "Add to campaign" : "Send email"}
+                  </span>
+                  {selectedCount > 0 && (
+                    <Badge
+                      variant="secondary"
+                      className="h-5 min-w-5 rounded-full bg-white/20 px-1.5 text-xs text-inherit"
+                    >
+                      {selectedCount}
+                    </Badge>
+                  )}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 gap-1.5 px-2 sm:px-3"
+                  disabled={!hasNotificationSelection}
+                  onClick={() => setSendModalOpen(true)}
+                >
+                  <Send className="h-4 w-4" />
+                  <span className="hidden sm:inline">Send notification</span>
+                </Button>
+              </div>
+            )}
+          </div>
+          <div
+            className={cn(
+              "flex items-center gap-1.5 overflow-x-auto rounded-xl border p-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+              isDark
+                ? "border-white/10 bg-slate-900/60"
+                : "border-slate-200/80 bg-slate-50/80",
+            )}
+          >
+            <div
+              className={cn(
+                "flex h-9 shrink-0 items-center gap-1.5 rounded-lg border px-2 sm:px-3",
+                isDark
+                  ? "border-white/10 bg-slate-950/40"
+                  : "border-slate-200 bg-white",
+              )}
+            >
+              <Checkbox
+                id="sticky-header"
+                checked={stickyHeader}
+                onCheckedChange={(checked) =>
+                  setStickyHeader(checked as boolean)
+                }
+                className={cn(
+                  isDark
+                    ? "border-gray-400 data-[state=checked]:bg-purple-600 data-[state=checked]:text-white"
+                    : "border-gray-400 data-[state=checked]:bg-purple-600",
+                )}
+              />
+              <label
+                htmlFor="sticky-header"
+                className={cn(
+                  "hidden cursor-pointer select-none text-xs font-normal sm:inline sm:text-sm",
+                  isDark ? "text-gray-300" : "text-gray-700",
+                )}
+              >
+                Sticky Header
+              </label>
+            </div>
+            <div
+              className={cn(
+                "flex h-9 shrink-0 items-center gap-0.5 rounded-lg border p-0.5",
+                isDark
+                  ? "border-white/10 bg-slate-950/40"
+                  : "border-slate-200 bg-white",
+              )}
+            >
+              <Button
+                variant={viewMode === "table" ? "secondary" : "ghost"}
+                size="sm"
+                className={cn(
+                  "h-8 gap-1.5 rounded-md px-2 sm:px-3",
+                  viewMode === "table"
+                    ? "bg-[#662EBD] text-white hover:bg-[#662EBD] hover:text-white"
+                    : isDark
+                      ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
+                )}
+                onClick={() => setViewModePersisted("table")}
+              >
+                <List className="h-4 w-4" />
+                <span className="hidden sm:inline">Table</span>
+              </Button>
+              <Button
+                variant={viewMode === "map" ? "secondary" : "ghost"}
+                size="sm"
+                className={cn(
+                  "h-8 gap-1.5 rounded-md px-2 sm:px-3",
+                  viewMode === "map"
+                    ? "bg-[#662EBD] text-white hover:bg-[#662EBD] hover:text-white"
+                    : isDark
+                      ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
+                )}
+                onClick={() => setViewModePersisted("map")}
+              >
+                <MapIcon className="h-4 w-4" />
+                <span className="hidden sm:inline">Map</span>
+              </Button>
+              <Button
+                variant={viewMode === "notifications" ? "secondary" : "ghost"}
+                size="sm"
+                className={cn(
+                  "h-8 gap-1.5 rounded-md px-2 sm:px-3",
+                  viewMode === "notifications"
+                    ? "bg-[#662EBD] text-white hover:bg-[#662EBD] hover:text-white"
+                    : isDark
+                      ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
+                )}
+                onClick={() => setViewModePersisted("notifications")}
+              >
+                <Bell className="h-4 w-4" />
+                <span className="hidden sm:inline">Notifications</span>
+              </Button>
+              <Button
+                variant={viewMode === "email" ? "secondary" : "ghost"}
+                size="sm"
+                className={cn(
+                  "h-8 gap-1.5 rounded-md px-2 sm:px-3",
+                  viewMode === "email"
+                    ? "bg-[#662EBD] text-white hover:bg-[#662EBD] hover:text-white"
+                    : isDark
+                      ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
+                )}
+                onClick={() => setViewModePersisted("email")}
+              >
+                <Mail className="h-4 w-4" />
+                <span className="hidden sm:inline">Email</span>
+              </Button>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (filters.length === 0) {
+                  const availableColumns =
+                    allColumns[activeTab as keyof typeof allColumns].filter(
+                      isTableFilterColumn,
+                    );
+                  setFilters([
+                    {
+                      id: `filter-${Date.now()}-${Math.random()}`,
+                      column: availableColumns[0]?.id || "",
+                      value: "",
+                    },
+                  ]);
+                }
+                setShowFilterModal(true);
+              }}
+              className={cn(
+                "h-9 shrink-0 gap-1.5 rounded-lg border-transparent bg-transparent px-2 shadow-none sm:px-3",
+                isDark
+                  ? "text-slate-200 hover:bg-white/10 hover:text-white"
+                  : "text-slate-700 hover:bg-white hover:text-slate-950",
+              )}
+              size="sm"
+            >
+              <Filter className="h-4 w-4" />
+              <span className="hidden sm:inline">Filter</span>
+              {filters.filter((f) => f.value.trim()).length > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="h-5 min-w-5 rounded-full px-1.5 text-xs"
+                >
+                  {filters.filter((f) => f.value.trim()).length}
+                </Badge>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setShowColumnSettings(true)}
+              className={cn(
+                "h-9 shrink-0 gap-1.5 rounded-lg border-transparent bg-transparent px-2 shadow-none sm:px-3",
+                isDark
+                  ? "text-slate-200 hover:bg-white/10 hover:text-white"
+                  : "text-slate-700 hover:bg-white hover:text-slate-950",
+              )}
+              size="sm"
+            >
+              <Settings className="h-4 w-4" />
+              <span className="hidden sm:inline">Customize Tiles</span>
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                const newTimezone = timezone === "UTC" ? "local" : "UTC";
+                setTimezone(newTimezone);
+                localStorage.setItem("users-management-timezone", newTimezone);
+              }}
+              className={cn(
+                "h-9 shrink-0 gap-1.5 rounded-lg border-transparent bg-transparent px-2 shadow-none sm:px-3",
+                isDark
+                  ? "text-slate-200 hover:bg-white/10 hover:text-white"
+                  : "text-slate-700 hover:bg-white hover:text-slate-950",
+              )}
+              size="sm"
+              title={`Current timezone: ${
+                timezone === "UTC" ? "UTC" : "Local"
+              }. Click to switch.`}
+            >
+              <Clock className="h-4 w-4" />
+              <span className="hidden text-xs font-medium sm:inline">
+                {timezone === "UTC" ? "UTC" : "Local"}
+              </span>
+            </Button>
+          </div>
+        </CardHeader>
+        {viewMode !== "notifications" && viewMode !== "email" && (
+          <CardContent className="px-3 pb-4 pt-0 sm:px-5">
+            <EnhancedTabs
+              tabs={[
+                { id: "all", label: "Users", count: allUsersCount },
+                {
+                  id: "advertisers",
+                  label: "Advertisers",
+                  count: advertisersCount,
+                },
+                { id: "creators", label: "Creators", count: creatorsCount },
+              ]}
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              className="w-full"
+              isDark={isDark}
+              variant="cards"
+            />
+          </CardContent>
+        )}
+      </Card>
+
+      {usersBackgroundLoadError && (
+        <div
+          className={cn(
+            "flex flex-col gap-3 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
+            isDark
+              ? "border-amber-400/20 bg-amber-500/10 text-amber-100"
+              : "border-amber-200 bg-amber-50 text-amber-950",
+          )}
+          role="status"
+        >
+          <div className="flex min-w-0 items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold">
+                Some users could not be loaded
+              </p>
+              <p
+                className={cn(
+                  "mt-0.5 text-xs",
+                  isDark ? "text-amber-200/80" : "text-amber-800",
+                )}
+              >
+                The current results are partial. Retry before exporting or
+                making bulk changes.
+              </p>
+            </div>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0 gap-1.5"
+            onClick={() => void load()}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Retry loading
+          </Button>
+        </div>
+      )}
+
+      {/* Warm-up selection mode banner */}
+      {viewMode === "table" && warmupSelectMode && (
+        <div className="rounded-xl border-2 border-indigo-400 bg-indigo-50 px-5 py-4 flex items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white shrink-0">
+              <Send className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="font-semibold text-indigo-900 text-sm">
+                Warm-Up Recipient Selection
+              </p>
+              <p className="text-xs text-indigo-700 mt-0.5">
+                Select users below using the checkboxes, then click "Add to
+                Warm-Up Send".
+                {wuMaxRecipients != null && (
+                  <span>
+                    {" "}
+                    Daily limit: select up to{" "}
+                    <span className="font-semibold">
+                      {wuMaxRecipients}
+                    </span>{" "}
+                    recipient
+                    {wuMaxRecipients !== 1 ? "s" : ""}.
+                  </span>
+                )}
+                {selectedCount > 0 && (
+                  <span className="font-semibold">
+                    {" "}
+                    {selectedCount} user{selectedCount !== 1 ? "s" : ""}{" "}
+                    selected.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+              onClick={() => {
+                setSelectedUserIds(new Set());
+                setSelectAllFiltered(false);
+                setWarmupSelectMode(false);
+                sessionStorage.removeItem("wu_mode");
+                // Set tab flag in sessionStorage
+                if (typeof window !== "undefined") {
+                  sessionStorage.setItem("wu_open_tab", "1");
+                }
+                setViewModePersisted("email");
+                window.dispatchEvent(new CustomEvent("wu:open-warmup-tab"));
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={selectedCount === 0}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={() => {
+                // Collect emails from selected users
+                const emails: string[] = [];
+                if (selectAllFiltered) {
+                  tabFiltered.forEach((u) => emails.push(u.email));
+                } else {
+                  selectedUserIds.forEach((id) => {
+                    const user = rows.find((r) => r.id === id);
+                    if (user?.email) emails.push(user.email);
+                  });
+                }
+
+                const maxRaw = sessionStorage.getItem("wu_max_recipients");
+                const maxRecipients = maxRaw ? parseInt(maxRaw, 10) : NaN;
+                let finalEmails = emails;
+                if (Number.isFinite(maxRecipients) && maxRecipients >= 0) {
+                  if (emails.length > maxRecipients) {
+                    finalEmails = emails.slice(0, maxRecipients);
+                    toast({
+                      title: "Daily send limit reached",
+                      description: `Only ${maxRecipients} warm-up recipient${maxRecipients !== 1 ? "s" : ""} can be sent today. The first ${maxRecipients} were added.`,
+                      variant: "destructive",
+                    });
+                  }
+                }
+
+                // Store emails and tab flag in sessionStorage
+                if (typeof window !== "undefined") {
+                  sessionStorage.setItem(
+                    "wu_emails",
+                    JSON.stringify(finalEmails),
+                  );
+                  sessionStorage.setItem("wu_open_tab", "1");
+                }
+                // Send emails back to the modal via custom event (fallback)
+                window.dispatchEvent(
+                  new CustomEvent("wu:users-selected", { detail: finalEmails }),
+                );
+                setSelectedUserIds(new Set());
+                setSelectAllFiltered(false);
+                setWarmupSelectMode(false);
+                sessionStorage.removeItem("wu_mode");
+                sessionStorage.removeItem("wu_max_recipients");
+                // Switch back to email → warmup tab
+                setViewModePersisted("email");
+                window.dispatchEvent(new CustomEvent("wu:open-warmup-tab"));
+              }}
+            >
+              <Send className="h-3.5 w-3.5 mr-1.5" />
+              Add {selectedCount > 0 ? selectedCount : ""} to Warm-Up Send
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Email lead selection mode banner */}
+      {viewMode === "table" && emailLeadSelectMode && (
+        <div className="rounded-xl border-2 border-[#662EBD] bg-purple-50 px-5 py-4 flex items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#662EBD] text-white shrink-0">
+              <Mail className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="font-semibold text-purple-900 text-sm">
+                Add leads to campaign
+                {emailLeadCampaignName ? `: ${emailLeadCampaignName}` : ""}
+              </p>
+              <p className="text-xs text-purple-700 mt-0.5">
+                Select users below using the checkboxes, then click &quot;Add to
+                campaign&quot;.
+                {selectedCount > 0 && (
+                  <span className="font-semibold">
+                    {" "}
+                    {selectedCount} user{selectedCount !== 1 ? "s" : ""}{" "}
+                    selected.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-purple-300 text-purple-700 hover:bg-purple-100"
+              onClick={() => {
+                const returnCampaignId = emailLeadCampaignId;
+                setSelectedUserIds(new Set());
+                setSelectAllFiltered(false);
+                clearEmailLeadSelectMode();
+                if (returnCampaignId) {
+                  setHighlightEmailCampaignId(returnCampaignId);
+                }
+                setViewModePersisted("email");
+                if (typeof window !== "undefined" && returnCampaignId) {
+                  const url = new URL(window.location.href);
+                  url.searchParams.set("tab", "email");
+                  url.searchParams.set("campaignId", returnCampaignId);
+                  window.history.replaceState({}, "", url.toString());
+                }
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={selectedCount === 0}
+              className="bg-[#662EBD] hover:bg-[#5524a8] text-white"
+              onClick={() => setEmailSendModalOpen(true)}
+            >
+              <Mail className="h-3.5 w-3.5 mr-1.5" />
+              Add {selectedCount > 0 ? selectedCount : ""} to campaign
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {viewMode === "table" && (
+        <Card
+          className={cn(
+            "rounded-xl shadow",
+            isDark ? "bg-[#170337]" : "bg-white",
+          )}
+        >
+          <CardContent className="px-6">
+            <div
+              className={cn(
+                stickyHeader
+                  ? "max-h-[calc(100vh-200px)] [&>div]:max-h-[calc(100vh-200px)] [&>div]:overflow-y-auto [&>div]:overflow-x-auto"
+                  : "[&>div]:overflow-x-auto",
+              )}
+            >
+              <Table>
+                <TableHeader
+                  className={cn(
+                    stickyHeader ? "sticky top-0 z-20" : "",
+                    isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                  )}
+                >
+                  <TableRow
+                    className={cn(
+                      "text-left border-b",
+                      isDark
+                        ? "bg-[#391A6A] text-white"
+                        : "bg-[#F9FAFB] border-b border-slate-200 text-gray-500",
+                    )}
+                  >
+                    <TableHead
+                      className={cn(
+                        "w-10 border-r px-2",
+                        isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "flex min-h-12 items-center justify-center",
+                          isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                        )}
+                      >
+                        <Checkbox
+                          aria-label={`Select all matching filters (${tabFiltered.length})`}
+                          checked={headerSelectChecked}
+                          disabled={backgroundLoading}
+                          title={
+                            backgroundLoading
+                              ? "Wait until all users finish loading"
+                              : undefined
+                          }
+                          onCheckedChange={(c) => toggleSelectAllFiltered(!!c)}
+                          className={cn(
+                            selectionCheckboxClass,
+                            isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                          )}
+                        />
+                      </div>
+                    </TableHead>
+                    {isColumnVisible("id") && (
+                      <SortableHeader columnId="id" label="ID" />
+                    )}
+                    {isColumnVisible("full_name") && (
+                      <SortableHeader columnId="full_name" label="Full Name" />
+                    )}
+                    {isColumnVisible("profile") && (
+                      <TableHead
+                        className={cn(
+                          "whitespace-nowrap border-r",
+                          isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                        )}
+                      >
+                        Profile
+                      </TableHead>
+                    )}
+                    {isColumnVisible("email") && (
+                      <SortableHeader columnId="email" label="Email" />
+                    )}
+                    {isColumnVisible("support_chat") && (
+                      <TableHead
+                        className={cn(
+                          "whitespace-nowrap border-r",
+                          isDark ? "bg-[#391A6A]" : "bg-[#F9FAFB]",
+                        )}
+                      >
+                        Support Chat
+                      </TableHead>
+                    )}
+                    {activeTab === "advertisers" && (
+                      <>
+                        {isColumnVisible("username") && (
+                          <SortableHeader
+                            columnId="username"
+                            label="Username"
+                          />
+                        )}
+                        {isColumnVisible("company_name") && (
+                          <SortableHeader
+                            columnId="company_name"
+                            label="Company Name"
+                          />
+                        )}
+                        {isColumnVisible("website_url") && (
+                          <SortableHeader
+                            columnId="website_url"
+                            label="Website URL"
+                          />
+                        )}
+                        {isColumnVisible("total_money_spent") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Money Spent</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_money_spent");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_money_spent" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_money_spent");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_money_spent" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_contests_run") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Campaigns Run</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_contests_run");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_contests_run" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_contests_run");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_contests_run" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("available_deposit_balance") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Available Deposit Balance</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(
+                                        "available_deposit_balance",
+                                      );
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn ===
+                                        "available_deposit_balance" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(
+                                        "available_deposit_balance",
+                                      );
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn ===
+                                        "available_deposit_balance" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("withdrawable_balance") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Withdrawable Balance</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("withdrawable_balance");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "withdrawable_balance" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("withdrawable_balance");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "withdrawable_balance" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("subscription_info") && (
+                          <SortableHeader
+                            columnId="subscription_info"
+                            label="Subscription Info"
+                          />
+                        )}
+                        {isColumnVisible("created_at") && (
+                          <SortableHeader
+                            columnId="created_at"
+                            label="Created At"
+                          />
+                        )}
+                        {isColumnVisible("updated_at") && (
+                          <SortableHeader
+                            columnId="updated_at"
+                            label="Updated At"
+                          />
+                        )}
+                      </>
+                    )}
+                    {activeTab === "creators" && (
+                      <>
+                        {isColumnVisible("username") && (
+                          <SortableHeader
+                            columnId="username"
+                            label="Username"
+                          />
+                        )}
+                        {isColumnVisible("youtube_account") && (
+                          <SortableHeader
+                            columnId="youtube_account"
+                            label="YouTube Account"
+                          />
+                        )}
+                        {isColumnVisible("instagram_account") && (
+                          <SortableHeader
+                            columnId="instagram_account"
+                            label="Instagram Account"
+                          />
+                        )}
+                        {isColumnVisible("tiktok_account") && (
+                          <SortableHeader
+                            columnId="tiktok_account"
+                            label="TikTok Account"
+                          />
+                        )}
+                        {isColumnVisible("twitter_account") && (
+                          <SortableHeader
+                            columnId="twitter_account"
+                            label="Twitter Account"
+                          />
+                        )}
+                        {isColumnVisible("contests_participated") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Contests Participated</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("contests_participated");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "contests_participated" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("contests_participated");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "contests_participated" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("contests_won") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Campaigns Won</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("contests_won");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "contests_won" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("contests_won");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "contests_won" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_views") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Views</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_views");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_views" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_views");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_views" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_money_won") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Money Won</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_money_won");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_money_won" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_money_won");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_money_won" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("withdrawable_balance") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Withdrawable Balance</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("withdrawable_balance");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "withdrawable_balance" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("withdrawable_balance");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "withdrawable_balance" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_submissions_made") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Submissions Made</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_submissions_made");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_submissions_made" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_submissions_made");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_submissions_made" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_submissions_won") && (
+                          <TableHead className="whitespace-nowrap border-r">
+                            <div className="flex items-center gap-2">
+                              <span>Total Submissions Won</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_submissions_won");
+                                      setSortOrder("asc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_submissions_won" &&
+                                        sortOrder === "asc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Ascending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn("total_submissions_won");
+                                      setSortOrder("desc");
+                                    }}
+                                    className={cn(
+                                      sortColumn === "total_submissions_won" &&
+                                        sortOrder === "desc" &&
+                                        "bg-accent",
+                                    )}
+                                  >
+                                    Sort by Descending
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setSortColumn(null);
+                                      setSortOrder(null);
+                                    }}
+                                  >
+                                    Clear Sort
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </TableHead>
+                        )}
+                        {isColumnVisible("total_reels") && (
+                          <SortableHeader
+                            columnId="total_reels"
+                            label="Total Reels"
+                          />
+                        )}
+                        {isColumnVisible("trust_score") && (
+                          <SortableHeader
+                            columnId="trust_score"
+                            label="Trust %"
+                          />
+                        )}
+                        {isColumnVisible("trust_number") && (
+                          <SortableHeader
+                            columnId="trust_number"
+                            label="Trust Score"
+                          />
+                        )}
+                        {isColumnVisible("pending_reels") && (
+                          <SortableHeader
+                            columnId="pending_reels"
+                            label="Pending Reels"
+                          />
+                        )}
+                        {isColumnVisible("rejected_reels") && (
+                          <SortableHeader
+                            columnId="rejected_reels"
+                            label="Rejected Reels"
+                          />
+                        )}
+                        {isColumnVisible("verified_reels") && (
+                          <SortableHeader
+                            columnId="verified_reels"
+                            label="Verified Reels"
+                          />
+                        )}
+                        {isColumnVisible("avg_quality_score") && (
+                          <SortableHeader
+                            columnId="avg_quality_score"
+                            label="Avg Quality Score"
+                          />
+                        )}
+                        {isColumnVisible("best_quality_score") && (
+                          <SortableHeader
+                            columnId="best_quality_score"
+                            label="Best Quality Score"
+                          />
+                        )}
+                        {isColumnVisible("quality_score_sum") && (
+                          <SortableHeader
+                            columnId="quality_score_sum"
+                            label="Quality Score Sum"
+                          />
+                        )}
+                        {isColumnVisible("scored_verified_count") && (
+                          <SortableHeader
+                            columnId="scored_verified_count"
+                            label="Score Verified Count"
+                          />
+                        )}
+                        {isColumnVisible("quality_score_counts") && (
+                          <SortableHeader
+                            columnId="quality_score_counts"
+                            label="Quality Score Counts"
+                          />
+                        )}
+                        {isColumnVisible("date_of_birth") && (
+                          <SortableHeader
+                            columnId="date_of_birth"
+                            label="Date of Birth"
+                          />
+                        )}
+                        {isColumnVisible("gender") && (
+                          <SortableHeader columnId="gender" label="Gender" />
+                        )}
+                        {isColumnVisible("country") && (
+                          <SortableHeader columnId="country" label="Country" />
+                        )}
+                        {isColumnVisible("state") && (
+                          <SortableHeader columnId="state" label="State" />
+                        )}
+                        {isColumnVisible("city") && (
+                          <SortableHeader columnId="city" label="City" />
+                        )}
+                        {isColumnVisible("address") && (
+                          <SortableHeader
+                            columnId="address"
+                            label="Address"
+                            className="min-w-[250px] max-w-md"
+                          />
+                        )}
+                        {isColumnVisible("language") && (
+                          <SortableHeader
+                            columnId="language"
+                            label="Language"
+                            className="min-w-[150px] max-w-sm"
+                          />
+                        )}
+                        {isColumnVisible("categories") && (
+                          <SortableHeader
+                            columnId="categories"
+                            label="Categories"
+                          />
+                        )}
+                        {isColumnVisible("subcategories") && (
+                          <SortableHeader
+                            columnId="subcategories"
+                            label="Subcategories"
+                          />
+                        )}
+                        {isColumnVisible("interests") && (
+                          <SortableHeader
+                            columnId="interests"
+                            label="Interests"
+                            className=""
+                          />
+                        )}
+                        {isColumnVisible("created_at") && (
+                          <SortableHeader
+                            columnId="created_at"
+                            label="Created At"
+                          />
+                        )}
+                        {isColumnVisible("updated_at") && (
+                          <SortableHeader
+                            columnId="updated_at"
+                            label="Updated At"
+                          />
+                        )}
+                      </>
+                    )}
+                    {activeTab !== "advertisers" &&
+                      activeTab !== "creators" && (
+                        <>
+                          {isColumnVisible("user_type") && (
+                            <SortableHeader
+                              columnId="user_type"
+                              label="User Type"
+                            />
+                          )}
+                          {isColumnVisible("username") && (
+                            <SortableHeader
+                              columnId="username"
+                              label="Username"
+                            />
+                          )}
+                          {isColumnVisible("referral_code") && (
+                            <SortableHeader
+                              columnId="referral_code"
+                              label="Referral Code"
+                            />
+                          )}
+                          {isColumnVisible("referred_by") && (
+                            <SortableHeader
+                              columnId="referred_by"
+                              label="Referred By"
+                            />
+                          )}
+                          {isColumnVisible("coins") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Coins</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("coins");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "coins" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("coins");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "coins" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("advertisers_referred") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Advertisers Referred</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("advertisers_referred");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "advertisers_referred" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("advertisers_referred");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "advertisers_referred" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("creators_referred") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Creators Referred</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("creators_referred");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "creators_referred" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("creators_referred");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "creators_referred" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("total_lifetime_coins") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Total Lifetime Coins</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("total_lifetime_coins");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "total_lifetime_coins" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("total_lifetime_coins");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "total_lifetime_coins" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("affiliate_earnings") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Affiliate Earnings</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("affiliate_earnings");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "affiliate_earnings" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("affiliate_earnings");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "affiliate_earnings" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("other_earnings") && (
+                            <TableHead className="whitespace-nowrap border-r">
+                              <div className="flex items-center gap-2">
+                                <span>Other Earnings</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("other_earnings");
+                                        setSortOrder("asc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "other_earnings" &&
+                                          sortOrder === "asc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Ascending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn("other_earnings");
+                                        setSortOrder("desc");
+                                      }}
+                                      className={cn(
+                                        sortColumn === "other_earnings" &&
+                                          sortOrder === "desc" &&
+                                          "bg-accent",
+                                      )}
+                                    >
+                                      Sort by Descending
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onClick={() => {
+                                        setSortColumn(null);
+                                        setSortOrder(null);
+                                      }}
+                                    >
+                                      Clear Sort
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableHead>
+                          )}
+                          {isColumnVisible("country") && (
+                            <SortableHeader
+                              columnId="country"
+                              label="Country"
+                            />
+                          )}
+                          {isColumnVisible("state") && (
+                            <SortableHeader columnId="state" label="State" />
+                          )}
+                          {isColumnVisible("city") && (
+                            <SortableHeader columnId="city" label="City" />
+                          )}
+                          {isColumnVisible("created_at") && (
+                            <SortableHeader
+                              columnId="created_at"
+                              label="Created At"
+                            />
+                          )}
+                          {isColumnVisible("updated_at") && (
+                            <SortableHeader
+                              columnId="updated_at"
+                              label="Updated At"
+                            />
+                          )}
+                        </>
+                      )}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {loading || !initialLoadDone ? (
+                    <>
+                      {Array.from({ length: limit }).map((_, index) => (
+                        <TableRow key={`skeleton-${index}`}>
+                          <TableCell
+                            className={cn(
+                              "w-10 border-r px-2",
+                              isDark ? "bg-[#170337]" : "bg-white",
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                "h-4 w-4 rounded animate-pulse",
+                                isDark ? "bg-[#391A6A]/50" : "bg-gray-200",
+                              )}
+                            />
+                          </TableCell>
+                          {Array.from({
+                            length: getVisibleColumnsCount(),
+                          }).map((_, colIndex) => (
+                            <TableCell
+                              key={`skeleton-cell-${index}-${colIndex}`}
+                              className="whitespace-nowrap border-r"
+                            >
+                              <div
+                                className={cn(
+                                  "h-4 rounded animate-pulse",
+                                  isDark ? "bg-[#391A6A]/50" : "bg-gray-200",
+                                )}
+                                style={{
+                                  width: `${Math.random() * 40 + 60}%`,
+                                }}
+                              />
+                            </TableCell>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </>
+                  ) : tabFiltered.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={getVisibleColumnsCount() + 1}
+                        className="text-center text-sm text-muted-foreground"
+                      >
+                        No users found.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    paginatedData.map((r) => {
+                      // Supabase returns advertiser_profiles as an object (one-to-one) or null
+                      // But it might also return as an array in some cases, so handle both
+                      const advertiserProfile = Array.isArray(
+                        r.advertiser_profiles,
+                      )
+                        ? r.advertiser_profiles.length > 0
+                          ? r.advertiser_profiles[0]
+                          : null
+                        : r.advertiser_profiles || null;
+                      // Handle both array and object cases for creator_profiles
+                      const creatorProfile = Array.isArray(r.creator_profiles)
+                        ? r.creator_profiles.length > 0
+                          ? r.creator_profiles[0]
+                          : null
+                        : r.creator_profiles || null;
+                      const creatorLanguages = creatorProfile?.languages;
+                      const trustMetrics = (() => {
+                        if (!creatorProfile?.trust_score_metrics) return null;
+                        try {
+                          const raw = creatorProfile.trust_score_metrics;
+                          return typeof raw === "string" ? JSON.parse(raw) : raw;
+                        } catch {
+                          return null;
+                        }
+                      })();
+                      const isSelected =
+                        selectAllFiltered || selectedUserIds.has(r.id);
+                      return (
+                        <TableRow key={r.id}>
+                          <TableCell
+                            className={cn(
+                              "w-10 border-r p-0",
+                              isDark ? "bg-[#170337]" : "bg-white",
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                "flex min-h-12 items-center justify-center px-2",
+                                isDark ? "bg-[#170337]" : "bg-white",
+                              )}
+                            >
+                              <Checkbox
+                                checked={isSelected}
+                                disabled={selectAllFiltered}
+                                onCheckedChange={(c) =>
+                                  toggleUserSelection(r.id, !!c)
+                                }
+                                className={selectionCheckboxClass}
+                              />
+                            </div>
+                          </TableCell>
+                          {isColumnVisible("id") && (
+                            <TableCell className="font-mono text-xs whitespace-nowrap border-r">
+                              {r.id}
+                            </TableCell>
+                          )}
+                          {isColumnVisible("full_name") && (
+                            <TableCell className="whitespace-nowrap border-r">
+                              {r.full_name}
+                            </TableCell>
+                          )}
+                          {isColumnVisible("profile") && (
+                            <TableCell className="whitespace-nowrap border-r">
+                              <Avatar className="w-10 h-10">
+                                <AvatarImage
+                                  src={r.profile_picture_url || undefined}
+                                  alt={r.full_name}
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <AvatarFallback className="text-xs">
+                                  {r.full_name?.[0]?.toUpperCase() ||
+                                    r.email?.[0]?.toUpperCase() ||
+                                    "?"}
+                                </AvatarFallback>
+                              </Avatar>
+                            </TableCell>
+                          )}
+                          {isColumnVisible("email") && (
+                            <TableCell className="whitespace-nowrap border-r">
+                              {r.email}
+                            </TableCell>
+                          )}
+                          {isColumnVisible("support_chat") && (
+                            <TableCell className="whitespace-nowrap border-r">
+                              <SupportChatToggle
+                                key={`${r.id}-${r.support_chat_enabled}`}
+                                userId={r.id}
+                                enabled={r.support_chat_enabled !== false}
+                                onUpdated={(enabled) =>
+                                  syncSupportChatEnabled(r.id, enabled)
+                                }
+                              />
+                            </TableCell>
+                          )}
+                          {activeTab === "advertisers" ? (
+                            <>
+                              {isColumnVisible("username") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.username || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("company_name") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {advertiserProfile?.company_name || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("website_url") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {advertiserProfile?.website_url ? (
+                                    <a
+                                      href={advertiserProfile.website_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-blue-600 hover:underline"
+                                    >
+                                      {advertiserProfile.website_url}
+                                    </a>
+                                  ) : (
+                                    "-"
+                                  )}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_money_spent") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {(
+                                    (advertiserProfile?.total_money_spent ||
+                                      0) / 100
+                                  ).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_contests_run") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {advertiserProfile?.total_contests_run || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("available_deposit_balance") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {(
+                                    (advertiserProfile?.available_deposit_balance ||
+                                      0) / 100
+                                  ).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("withdrawable_balance") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {(
+                                    (advertiserProfile?.withdrawable_balance ||
+                                      0) / 100
+                                  ).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("subscription_info") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {(() => {
+                                    const subscriptionInfo =
+                                      advertiserProfile?.subscription_info;
+                                    if (!subscriptionInfo) {
+                                      return (
+                                        <span className="text-muted-foreground">
+                                          -
+                                        </span>
+                                      );
+                                    }
+
+                                    try {
+                                      const info =
+                                        typeof subscriptionInfo === "string"
+                                          ? JSON.parse(subscriptionInfo)
+                                          : subscriptionInfo;
+
+                                      const isActive =
+                                        info?.status === "active" ||
+                                        info?.status === "trialing";
+
+                                      if (!isActive) {
+                                        return (
+                                          <span className="text-muted-foreground">
+                                            -
+                                          </span>
+                                        );
+                                      }
+
+                                      // Get plan name from product_id
+                                      const plan = info?.product_id
+                                        ? getSubscriptionPlanById(
+                                            info.product_id,
+                                          )
+                                        : null;
+                                      const planName =
+                                        plan?.displayName ||
+                                        plan?.name ||
+                                        "Unknown Plan";
+
+                                      // Get amount (price_amount is in cents)
+                                      const amount = info?.price_amount;
+                                      const formattedAmount = amount
+                                        ? `$${(amount / 100).toFixed(2)}`
+                                        : "-";
+
+                                      return (
+                                        <div className="flex items-center gap-2">
+                                          <div className="flex flex-col">
+                                            <span className="font-medium text-sm">
+                                              {planName}
+                                            </span>
+                                            {amount !== undefined && (
+                                              <span className="text-xs text-muted-foreground">
+                                                {formattedAmount}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            className="ml-2"
+                                            onClick={() => {
+                                              setSelectedSubscriptionInfo(
+                                                subscriptionInfo,
+                                              );
+                                              setIsSubscriptionDialogOpen(true);
+                                            }}
+                                          >
+                                            View Details
+                                          </Button>
+                                        </div>
+                                      );
+                                    } catch {
+                                      return (
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-muted-foreground">
+                                            Connected
+                                          </span>
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => {
+                                              setSelectedSubscriptionInfo(
+                                                subscriptionInfo,
+                                              );
+                                              setIsSubscriptionDialogOpen(true);
+                                            }}
+                                          >
+                                            View Details
+                                          </Button>
+                                        </div>
+                                      );
+                                    }
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("created_at") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {formatDate(r.created_at)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("updated_at") && (
+                                <TableCell className="whitespace-nowrap">
+                                  {formatDate(r.updated_at)}
+                                </TableCell>
+                              )}
+                            </>
+                          ) : activeTab === "creators" ? (
+                            <>
+                              {isColumnVisible("username") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.username || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("youtube_account") && (
+                                <TableCell className="border-r min-w-[200px]">
+                                  {(() => {
+                                    const ytAccount =
+                                      creatorProfile?.youtube_account;
+                                    if (!ytAccount) return "-";
+                                    try {
+                                      const account =
+                                        typeof ytAccount === "string"
+                                          ? JSON.parse(ytAccount)
+                                          : ytAccount;
+
+                                      // Construct YouTube channel URL (@handle or /channel/ID)
+                                      let youtubeUrl = "";
+                                      const handle = account?.channel_custom_url
+                                        ?.replace(/^@/, "")
+                                        .trim();
+                                      if (handle) {
+                                        youtubeUrl = `https://www.youtube.com/@${handle}`;
+                                      } else if (account?.channel_id) {
+                                        youtubeUrl = `https://www.youtube.com/channel/${account.channel_id}`;
+                                      }
+
+                                      return (
+                                        <div className="space-y-1">
+                                          <div className="flex items-center gap-2">
+                                            <div className="font-medium text-sm">
+                                              {account?.channel_title ||
+                                                "YouTube"}
+                                            </div>
+                                            {youtubeUrl && (
+                                              <a
+                                                href={youtubeUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-red-600 hover:text-red-700 transition-colors"
+                                                title="Visit YouTube Channel"
+                                              >
+                                                <svg
+                                                  className="w-5 h-5"
+                                                  fill="currentColor"
+                                                  viewBox="0 0 24 24"
+                                                  xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                  <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                                                </svg>
+                                              </a>
+                                            )}
+                                          </div>
+                                          {account?.subscriber_count && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.subscriber_count.toLocaleString()}{" "}
+                                              subscribers
+                                            </div>
+                                          )}
+                                          {account?.video_count && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.video_count.toLocaleString()}{" "}
+                                              videos
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    } catch {
+                                      return (
+                                        <Badge variant="secondary">
+                                          Connected
+                                        </Badge>
+                                      );
+                                    }
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("instagram_account") && (
+                                <TableCell className="min-w-[200px] border-r">
+                                  {(() => {
+                                    const igAccount =
+                                      creatorProfile?.instagram_account;
+                                    if (!igAccount) return "-";
+                                    try {
+                                      const account =
+                                        typeof igAccount === "string"
+                                          ? JSON.parse(igAccount)
+                                          : igAccount;
+
+                                      // Construct Instagram profile URL
+                                      const instagramUrl = account?.username
+                                        ? `https://instagram.com/${account.username}`
+                                        : "";
+
+                                      return (
+                                        <div className="space-y-1">
+                                          <div className="flex items-center gap-2">
+                                            <div className="font-medium text-sm">
+                                              {account?.name_of_account ||
+                                                account?.username ||
+                                                "Instagram"}
+                                            </div>
+                                            {instagramUrl && (
+                                              <a
+                                                href={instagramUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-pink-600 hover:text-pink-700 transition-colors"
+                                                title="Visit Instagram Profile"
+                                              >
+                                                <svg
+                                                  className="w-5 h-5"
+                                                  fill="currentColor"
+                                                  viewBox="0 0 24 24"
+                                                  xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                  <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
+                                                </svg>
+                                              </a>
+                                            )}
+                                          </div>
+                                          {account?.username && (
+                                            <div className="text-xs text-muted-foreground">
+                                              @{account.username}
+                                            </div>
+                                          )}
+                                          {account?.followers_count !==
+                                            undefined && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.followers_count.toLocaleString()}{" "}
+                                              followers
+                                            </div>
+                                          )}
+                                          {account?.account_type && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.account_type}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    } catch {
+                                      return (
+                                        <Badge variant="secondary">
+                                          Connected
+                                        </Badge>
+                                      );
+                                    }
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("tiktok_account") && (
+                                <TableCell className="min-w-[200px] border-r">
+                                  {(() => {
+                                    const ttAccount =
+                                      creatorProfile?.tiktok_account;
+                                    if (!ttAccount) return "-";
+                                    try {
+                                      const account =
+                                        typeof ttAccount === "string"
+                                          ? JSON.parse(ttAccount)
+                                          : ttAccount;
+
+                                      const tiktokUrl = account?.username
+                                        ? `https://tiktok.com/@${account.username.replace(/^@/, "")}`
+                                        : "";
+
+                                      return (
+                                        <div className="space-y-1">
+                                          <div className="flex items-center gap-2">
+                                            <div className="font-medium text-sm">
+                                              {account?.display_name ||
+                                                account?.username ||
+                                                "TikTok"}
+                                            </div>
+                                            {tiktokUrl && (
+                                              <a
+                                                href={tiktokUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-black dark:text-white hover:opacity-80 transition-opacity"
+                                                title="Visit TikTok Profile"
+                                              >
+                                                <svg
+                                                  className="w-5 h-5"
+                                                  fill="currentColor"
+                                                  viewBox="0 0 24 24"
+                                                  xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                  <path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 2.22-1.15 4.39-2.91 5.74-1.76 1.34-4.11 1.83-6.26 1.37-2.14-.45-4.01-1.83-5.02-3.79-1-1.95-1.07-4.32-.2-6.32.88-1.99 2.65-3.5 4.75-4.04 1.15-.3 2.37-.33 3.54-.15V13.4c-1.29-.16-2.65-.05-3.83.6-1.18.66-2.07 1.82-2.3 3.16-.23 1.32.13 2.74 1.05 3.65.91.9 2.31 1.25 3.55.93 1.24-.31 2.19-1.32 2.47-2.55.28-1.21.05-5.91.05-7.14V.02zm-3.14 0" />
+                                                </svg>
+                                              </a>
+                                            )}
+                                          </div>
+                                          {/* {account?.username && (
+                                            <div className="text-xs text-muted-foreground">
+                                              @{account.username.replace(/^@/, "")}
+                                            </div>
+                                          )} */}
+                                          {account?.follower_count !==
+                                            undefined && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.follower_count.toLocaleString()}{" "}
+                                              followers
+                                            </div>
+                                          )}
+                                          {/* {account?.likes_count !==
+                                            undefined && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.likes_count.toLocaleString()}{" "}
+                                              likes
+                                            </div>
+                                          )} */}
+                                          {account?.video_count !==
+                                            undefined && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.video_count.toLocaleString()}{" "}
+                                              videos
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    } catch {
+                                      return (
+                                        <Badge variant="secondary">
+                                          Connected
+                                        </Badge>
+                                      );
+                                    }
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("twitter_account") && (
+                                <TableCell className="min-w-[200px] border-r">
+                                  {(() => {
+                                    const twAccount =
+                                      creatorProfile?.twitter_account;
+                                    if (!twAccount) return "-";
+                                    try {
+                                      const account =
+                                        typeof twAccount === "string"
+                                          ? JSON.parse(twAccount)
+                                          : twAccount;
+
+                                      const twitterUrl = account?.username
+                                        ? `https://twitter.com/${account.username}`
+                                        : "";
+
+                                      return (
+                                        <div className="space-y-1">
+                                          <div className="flex items-center gap-2">
+                                            <div className="font-medium text-sm">
+                                              {account?.name ||
+                                                account?.username ||
+                                                "Twitter"}
+                                            </div>
+                                            {twitterUrl && (
+                                              <a
+                                                href={twitterUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-sky-500 hover:text-sky-600 transition-colors"
+                                                title="Visit Twitter Profile"
+                                              >
+                                                <svg
+                                                  className="w-5 h-5"
+                                                  fill="currentColor"
+                                                  viewBox="0 0 24 24"
+                                                  xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                                                </svg>
+                                              </a>
+                                            )}
+                                          </div>
+                                          {account?.username && (
+                                            <div className="text-xs text-muted-foreground">
+                                              @{account.username}
+                                            </div>
+                                          )}
+                                          {account?.followers_count !==
+                                            undefined && (
+                                            <div className="text-xs text-muted-foreground">
+                                              {account.followers_count.toLocaleString()}{" "}
+                                              followers
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    } catch {
+                                      return (
+                                        <Badge variant="secondary">
+                                          Connected
+                                        </Badge>
+                                      );
+                                    }
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("contests_participated") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.total_contests_participated ||
+                                    0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("contests_won") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.total_contests_won || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_views") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.total_views?.toLocaleString() ||
+                                    0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_money_won") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {(
+                                    (creatorProfile?.total_money_won || 0) / 100
+                                  ).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("withdrawable_balance") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {(
+                                    (creatorProfile?.withdrawable_balance ||
+                                      0) / 100
+                                  ).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_submissions_made") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.total_submissions_made || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_submissions_won") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.total_submissions_won || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_reels") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.total_reels ?? 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("trust_score") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.trust_score ?? 100}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("trust_number") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.trust_number ?? 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("pending_reels") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.pending_reels ?? 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("rejected_reels") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.rejected_reels ?? 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("verified_reels") && (
+                                <TableCell className="whitespace-nowrap border-r text-xs">
+                                  {trustMetrics?.verified_reels ?? 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("avg_quality_score") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.avg_quality_score !== null &&
+                                  creatorProfile?.avg_quality_score !== undefined
+                                    ? Number(creatorProfile.avg_quality_score).toFixed(2)
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("best_quality_score") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.best_quality_score !== null &&
+                                  creatorProfile?.best_quality_score !== undefined
+                                    ? creatorProfile.best_quality_score
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("quality_score_sum") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.quality_score_sum !== null &&
+                                  creatorProfile?.quality_score_sum !== undefined
+                                    ? Number(creatorProfile.quality_score_sum).toFixed(2)
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("scored_verified_count") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.scored_verified_count !== null &&
+                                  creatorProfile?.scored_verified_count !== undefined
+                                    ? creatorProfile.scored_verified_count
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("quality_score_counts") && (() => {
+                                const counts = (() => {
+                                  if (!creatorProfile?.quality_score_counts) return null;
+                                  try {
+                                    const raw = creatorProfile.quality_score_counts;
+                                    return typeof raw === "string" ? JSON.parse(raw) : raw;
+                                  } catch {
+                                    return null;
+                                  }
+                                })();
+
+                                if (!counts) {
+                                  return (
+                                    <TableCell className="whitespace-nowrap border-r text-muted-foreground text-xs">
+                                      -
+                                    </TableCell>
+                                  );
+                                }
+
+                                return (
+                                  <TableCell className="whitespace-nowrap border-r text-sm">
+                                    <div className="flex flex-col gap-0.5 text-left text-muted-foreground">
+                                      <div>Score 1: <strong className="font-semibold text-foreground">{counts.score1 ?? 0}</strong></div>
+                                      <div>Score 2: <strong className="font-semibold text-foreground">{counts.score2 ?? 0}</strong></div>
+                                      <div>Score 3: <strong className="font-semibold text-foreground">{counts.score3 ?? 0}</strong></div>
+                                      <div>Score 4: <strong className="font-semibold text-foreground">{counts.score4 ?? 0}</strong></div>
+                                      <div>Score 5: <strong className="font-semibold text-foreground">{counts.score5 ?? 0}</strong></div>
+                                    </div>
+                                  </TableCell>
+                                );
+                              })()}
+                              {isColumnVisible("date_of_birth") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.date_of_birth
+                                    ? new Date(
+                                        creatorProfile.date_of_birth,
+                                      ).toLocaleDateString()
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("gender") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {creatorProfile?.gender || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("country") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "country") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("state") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "state") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("city") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "city") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("address") && (
+                                <TableCell className="border-r min-w-[250px] max-w-md">
+                                  <div className="break-words">
+                                    {creatorProfile?.address || "-"}
+                                  </div>
+                                </TableCell>
+                              )}
+                              {isColumnVisible("language") && (
+                                <TableCell className="border-r min-w-[150px] max-w-sm">
+                                  <div className="break-words">
+                                    {Array.isArray(creatorLanguages)
+                                      ? creatorLanguages.join(", ")
+                                      : creatorLanguages || "-"}
+                                  </div>
+                                </TableCell>
+                              )}
+                              {isColumnVisible("categories") && (
+                                <TableCell className="whitespace-nowrap border-r max-w-xs">
+                                  <div className="truncate">
+                                    {creatorProfile?.categories
+                                      ? Array.isArray(creatorProfile.categories)
+                                        ? creatorProfile.categories.join(", ")
+                                        : typeof creatorProfile.categories ===
+                                            "string"
+                                          ? creatorProfile.categories
+                                          : JSON.stringify(
+                                              creatorProfile.categories,
+                                            )
+                                      : "-"}
+                                  </div>
+                                </TableCell>
+                              )}
+                              {isColumnVisible("subcategories") && (
+                                <TableCell className="border-r max-w-xs">
+                                  {(() => {
+                                    const subcategories =
+                                      creatorProfile?.subcategories;
+                                    if (!subcategories) return <div>-</div>;
+
+                                    let subcategoriesArray: string[] = [];
+                                    if (Array.isArray(subcategories)) {
+                                      // Convert each item to string, handling objects properly
+                                      subcategoriesArray = subcategories.map(
+                                        (item: any) => {
+                                          if (
+                                            typeof item === "object" &&
+                                            item !== null
+                                          ) {
+                                            // If it has category and subcategory, format nicely
+                                            if (
+                                              item.category &&
+                                              item.subcategory
+                                            ) {
+                                              return `${item.category}: ${item.subcategory}`;
+                                            }
+                                            // Otherwise, stringify the object
+                                            return JSON.stringify(item);
+                                          }
+                                          return String(item);
+                                        },
+                                      );
+                                    } else if (
+                                      typeof subcategories === "string"
+                                    ) {
+                                      // Try to parse if it's a JSON string, otherwise split by comma
+                                      try {
+                                        const parsed =
+                                          JSON.parse(subcategories);
+                                        if (Array.isArray(parsed)) {
+                                          subcategoriesArray = parsed.map(
+                                            (item: any) => {
+                                              if (
+                                                typeof item === "object" &&
+                                                item !== null
+                                              ) {
+                                                if (
+                                                  item.category &&
+                                                  item.subcategory
+                                                ) {
+                                                  return `${item.category}: ${item.subcategory}`;
+                                                }
+                                                return JSON.stringify(item);
+                                              }
+                                              return String(item);
+                                            },
+                                          );
+                                        } else {
+                                          subcategoriesArray = [subcategories];
+                                        }
+                                      } catch {
+                                        subcategoriesArray = subcategories
+                                          .split(",")
+                                          .map((s) => s.trim());
+                                      }
+                                    } else {
+                                      subcategoriesArray = [
+                                        JSON.stringify(subcategories),
+                                      ];
+                                    }
+
+                                    return (
+                                      <SubcategoriesCell
+                                        subcategories={subcategoriesArray}
+                                        onViewAll={(subcats, cats) => {
+                                          setSelectedSubcategories(
+                                            creatorProfile?.subcategories,
+                                          );
+                                          setSelectedCategories(
+                                            creatorProfile?.categories,
+                                          );
+                                          setIsSubcategoriesDialogOpen(true);
+                                        }}
+                                      />
+                                    );
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("interests") && (
+                                <TableCell className="border-r max-w-xs">
+                                  {(() => {
+                                    const interests = creatorProfile?.interests;
+                                    if (!interests) return <div>-</div>;
+
+                                    let interestsArray: string[] = [];
+                                    if (Array.isArray(interests)) {
+                                      interestsArray = interests;
+                                    } else if (typeof interests === "string") {
+                                      // Try to parse if it's a JSON string, otherwise split by comma
+                                      try {
+                                        const parsed = JSON.parse(interests);
+                                        interestsArray = Array.isArray(parsed)
+                                          ? parsed
+                                          : [interests];
+                                      } catch {
+                                        interestsArray = interests
+                                          .split(",")
+                                          .map((s) => s.trim());
+                                      }
+                                    } else {
+                                      interestsArray = [
+                                        JSON.stringify(interests),
+                                      ];
+                                    }
+
+                                    return (
+                                      <InterestsCell
+                                        interests={interestsArray}
+                                        onViewAll={(interestsList) => {
+                                          setSelectedInterests(
+                                            creatorProfile?.interests,
+                                          );
+                                          setIsInterestsDialogOpen(true);
+                                        }}
+                                      />
+                                    );
+                                  })()}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("created_at") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {formatDate(r.created_at)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("updated_at") && (
+                                <TableCell className="whitespace-nowrap">
+                                  {formatDate(r.updated_at)}
+                                </TableCell>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {isColumnVisible("user_type") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  <Badge
+                                    variant={
+                                      r.user_type === "admin"
+                                        ? "destructive"
+                                        : r.user_type === "advertiser"
+                                          ? "default"
+                                          : "secondary"
+                                    }
+                                  >
+                                    {r.user_type}
+                                  </Badge>
+                                </TableCell>
+                              )}
+                              {isColumnVisible("username") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.username || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("referral_code") && (
+                                <TableCell className="font-mono text-xs whitespace-nowrap border-r">
+                                  {r.referral_code || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("referred_by") && (
+                                <TableCell className="font-mono text-xs whitespace-nowrap border-r">
+                                  {r.referred_by || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("coins") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.coins || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("advertisers_referred") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.advertisers_referred || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("creators_referred") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.creators_referred || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("total_lifetime_coins") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {r.total_lifetime_coins_earned || 0}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("affiliate_earnings") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  $
+                                  {((r.affiliate_earnings || 0) / 100).toFixed(
+                                    2,
+                                  )}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("other_earnings") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  ${((r.other_earnings || 0) / 100).toFixed(2)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("country") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "country") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("state") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "state") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("city") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {getGeoField(r, "city") || "-"}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("created_at") && (
+                                <TableCell className="whitespace-nowrap border-r">
+                                  {formatDate(r.created_at)}
+                                </TableCell>
+                              )}
+                              {isColumnVisible("updated_at") && (
+                                <TableCell className="whitespace-nowrap">
+                                  {formatDate(r.updated_at)}
+                                </TableCell>
+                              )}
+                            </>
+                          )}
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+            {initialLoadDone && !loading && tabFiltered.length > 0 && (
+              <div className="mt-4">
+                <PaginationControls
+                  page={page}
+                  limit={limit}
+                  total={tabFiltered.length}
+                  totalPages={totalPages}
+                  hasNextPage={hasNextPage}
+                  hasPreviousPage={hasPreviousPage}
+                  onPageChange={setPage}
+                  onLimitChange={setLimit}
+                  loading={loading}
+                />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {viewMode === "map" && (
+        <Card className="border-0 bg-transparent shadow-none">
+          <CardContent className="p-0">
+            <UsersMap
+              markers={mapMarkers}
+              activeTab={activeTab}
+              totalInTab={tabFiltered.length}
+              isDark={isDark}
+              groupBy={mapGroupBy}
+              onActiveTabChange={setActiveTab}
+              onGroupByChange={setMapGroupBy}
+              tabCounts={{
+                all: allUsersCount,
+                advertisers: advertisersCount,
+                creators: creatorsCount,
+              }}
+              isLoading={loading}
+              isBackgroundLoading={backgroundLoading}
+              loadError={usersLoadError}
+              onRetry={() => void load()}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {viewMode === "notifications" && (
+        <AdminNotificationsView
+          isDark={isDark}
+          timezone={timezone}
+          highlightCampaignId={highlightCampaignId}
+          onHighlightConsumed={() => setHighlightCampaignId(null)}
+        />
+      )}
+
+      {emailTabVisited && (
+        <div className={cn(viewMode !== "email" && "hidden")}>
+          <AdminEmailView
+            isDark={isDark}
+            highlightCampaignId={highlightEmailCampaignId}
+            onHighlightConsumed={() => setHighlightEmailCampaignId(null)}
+          />
+        </div>
+      )}
+
+      <AttachEmailCampaignModal
+        open={emailSendModalOpen}
+        onOpenChange={setEmailSendModalOpen}
+        selection={notificationSelection}
+        isDark={isDark}
+        presetCampaignId={emailLeadSelectMode ? emailLeadCampaignId : null}
+        onSuccess={(campaignId) => {
+          setSelectedUserIds(new Set());
+          setSelectAllFiltered(false);
+          clearEmailLeadSelectMode();
+          toast({
+            title: "Users attached",
+            description:
+              "Configure template and schedule on the campaign page.",
+          });
+          setHighlightEmailCampaignId(campaignId);
+          setViewModePersisted("email");
+          if (typeof window !== "undefined") {
+            const url = new URL(window.location.href);
+            url.searchParams.set("tab", "email");
+            url.searchParams.set("campaignId", campaignId);
+            window.history.replaceState({}, "", url.toString());
+          }
+        }}
+      />
+
+      <AddLeadsToCampaignModal
+        open={emailBundlesModalOpen}
+        onOpenChange={setEmailBundlesModalOpen}
+        campaignId={emailLeadSelectMode ? emailLeadCampaignId : null}
+        campaignName={emailLeadCampaignName ?? undefined}
+        selection={notificationSelection}
+        variant={bundlesModalVariant}
+        defaultTab={bundlesModalDefaultTab}
+        onSuccess={(campaignId) => {
+          if (emailLeadSelectMode) clearEmailLeadSelectMode();
+          setSelectedUserIds(new Set());
+          setSelectAllFiltered(false);
+          toast({
+            title: "Bundles added",
+            description:
+              "Leads from selected bundles were added to the campaign.",
+          });
+          setHighlightEmailCampaignId(campaignId);
+          setViewModePersisted("email");
+          if (typeof window !== "undefined") {
+            const url = new URL(window.location.href);
+            url.searchParams.set("tab", "email");
+            url.searchParams.set("campaignId", campaignId);
+            window.history.replaceState({}, "", url.toString());
+          }
+        }}
+        onBundleCreated={() => {
+          setSelectedUserIds(new Set());
+          setSelectAllFiltered(false);
+          setViewModePersisted("email");
+          if (typeof window !== "undefined") {
+            sessionStorage.setItem("email_open_leads_tab", "1");
+            const url = new URL(window.location.href);
+            url.searchParams.set("tab", "email");
+            url.searchParams.delete("campaignId");
+            window.history.replaceState({}, "", url.toString());
+          }
+          window.dispatchEvent(new CustomEvent("email:open-leads-tab"));
+        }}
+      />
+
+      <SendNotificationModal
+        open={sendModalOpen}
+        onOpenChange={setSendModalOpen}
+        selection={notificationSelection}
+        timezone={timezone}
+        isDark={isDark}
+        onSuccess={(result) => {
+          setSelectedUserIds(new Set());
+          setSelectAllFiltered(false);
+          if (result.status === "scheduled" && result.scheduledAt) {
+            scheduleClientDelivery(result.campaignId, result.scheduledAt);
+            const qstashNote =
+              "qstashScheduled" in result && result.qstashScheduled ? "" : "";
+            toast({
+              title: "Notification scheduled",
+              description: `Scheduled for ${new Date(result.scheduledAt).toLocaleString()} (your local time).${qstashNote}`,
+            });
+          } else if (result.status === "processing") {
+            toast({
+              title: "Delivery in progress",
+              description: `Sending to ${result.recipientCount} user(s). Watch progress on the Notifications tab.`,
+            });
+          } else if (result.failureCount && result.failureCount > 0) {
+            toast({
+              title: "Partially sent",
+              description: `${result.successCount ?? 0} sent, ${result.failureCount} failed`,
+              variant: "destructive",
+            });
+          } else {
+            toast({
+              title: "Notification sent",
+              description: `Notification sent to ${result.recipientCount} user(s)`,
+            });
+          }
+          setHighlightCampaignId(result.campaignId);
+          setViewModePersisted("notifications");
+        }}
+      />
+
+      {/* Column Customization Dialog */}
+      <Dialog
+        open={showColumnSettings}
+        onOpenChange={setShowColumnSettings}
+        isdark={isDark}
+      >
+        <DialogContent
+          className={cn(
+            "max-w-4xl max-h-[80vh] overflow-y-auto",
+            isDark ? "text-white" : "text-gray-900",
+          )}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={cn(isDark ? "text-white" : "text-gray-900")}
+            >
+              {activeTab === "all"
+                ? "Users"
+                : activeTab === "advertisers"
+                  ? "Advertisers"
+                  : "Creators"}{" "}
+              Columns
+            </DialogTitle>
+            <DialogDescription
+              className={cn(isDark ? "text-gray-300" : "text-gray-600")}
+            >
+              Select which columns to display in the{" "}
+              {activeTab === "all"
+                ? "Users"
+                : activeTab === "advertisers"
+                  ? "Advertisers"
+                  : "Creators"}{" "}
+              table. Click on a column to toggle its visibility.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {allColumns[activeTab as keyof typeof allColumns].map(
+                (column) => {
+                  const isVisible = isColumnVisible(column.id);
+                  return (
+                    <div
+                      key={column.id}
+                      className={cn(
+                        "p-3 border rounded-lg cursor-pointer transition-all",
+                        isVisible
+                          ? isDark
+                            ? "bg-[#391A6A] border-purple-500 text-white"
+                            : "bg-purple-50 border-purple-200 text-gray-900"
+                          : isDark
+                            ? "border-gray-600 hover:bg-[#2A1249] text-gray-300"
+                            : "border-gray-300 hover:bg-gray-100 text-gray-700",
+                      )}
+                      onClick={() => toggleColumn(column.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={cn(
+                            "w-4 h-4 rounded border-2 flex items-center justify-center",
+                            isVisible
+                              ? "bg-purple-600 border-purple-600"
+                              : isDark
+                                ? "border-gray-500"
+                                : "border-gray-400",
+                          )}
+                        >
+                          {isVisible && (
+                            <Check className="w-3 h-3 text-white" />
+                          )}
+                        </div>
+                        <span className="text-sm font-medium">
+                          {column.label}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                },
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Filter Dialog */}
+      <Dialog
+        open={showFilterModal}
+        onOpenChange={setShowFilterModal}
+        isdark={isDark}
+      >
+        <DialogContent
+          className={cn(
+            "w-[calc(100%-1rem)] max-w-[calc(100vw-1rem)] sm:max-w-md md:max-w-2xl lg:max-w-4xl max-h-[90vh] sm:max-h-[80vh] overflow-y-auto p-4 sm:p-6",
+            isDark ? "text-white" : "text-gray-900",
+          )}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={cn(
+                "text-lg sm:text-xl",
+                isDark ? "text-white" : "text-gray-900",
+              )}
+            >
+              Filter{" "}
+              {activeTab === "all"
+                ? "Users"
+                : activeTab === "advertisers"
+                  ? "Advertisers"
+                  : "Creators"}
+            </DialogTitle>
+            <DialogDescription
+              className={cn(
+                "text-xs sm:text-sm",
+                isDark ? "text-gray-300" : "text-gray-600",
+              )}
+            >
+              Add filters to search and filter the table data. You can add
+              multiple filters for different columns.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-3 sm:mt-4 space-y-3 sm:space-y-4">
+            {filters.length === 0 ? (
+              <div
+                className={cn(
+                  "flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 p-3 sm:p-4 rounded-lg border",
+                  isDark
+                    ? "bg-[#1a102b] border-gray-700"
+                    : "bg-gray-50 border-gray-200",
+                )}
+              >
+                <div className="flex-1 min-w-0">
+                  <Select
+                    value={
+                      emptyFilterColumn ||
+                      allColumns[activeTab as keyof typeof allColumns].filter(
+                        isTableFilterColumn,
+                      )[0]?.id ||
+                      ""
+                    }
+                    onValueChange={(value) => {
+                      setEmptyFilterColumn(value);
+                      if (emptyFilterValue) {
+                        setFilters([
+                          {
+                            id: `filter-${Date.now()}-${Math.random()}`,
+                            column: value,
+                            value: emptyFilterValue,
+                          },
+                        ]);
+                        setEmptyFilterValue("");
+                      }
+                    }}
+                  >
+                    <SelectTrigger isDark={isDark} className="w-full">
+                      <SelectValue placeholder="Select column" />
+                    </SelectTrigger>
+                    <SelectContent isDark={isDark}>
+                      {allColumns[activeTab as keyof typeof allColumns]
+                        .filter(isTableFilterColumn)
+                        .map((column) => (
+                          <SelectItem
+                            key={column.id}
+                            value={column.id}
+                            isDark={isDark}
+                          >
+                            {column.label}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex-1 min-w-0">
+                  {(() => {
+                    const selectedColumnId =
+                      emptyFilterColumn ||
+                      allColumns[activeTab as keyof typeof allColumns].filter(
+                        isTableFilterColumn,
+                      )[0]?.id ||
+                      "";
+                    const isUserType = selectedColumnId === "user_type";
+                    const isGender = selectedColumnId === "gender";
+                    const isCountry = selectedColumnId === "country";
+
+                    // Check if this field supports comparison operators
+                    const earningsFields = [
+                      "affiliate_earnings",
+                      "other_earnings",
+                    ];
+                    const moneyFields = [
+                      "total_money_spent",
+                      "available_deposit_balance",
+                      "withdrawable_balance",
+                      "total_money_won",
+                    ];
+                    const integerFields = [
+                      "coins",
+                      "advertisers_referred",
+                      "creators_referred",
+                      "total_lifetime_coins",
+                      "total_contests_run",
+                      "contests_participated",
+                      "contests_won",
+                      "total_views",
+                      "total_submissions_made",
+                      "total_submissions_won",
+                      "trust_score",
+                      "avg_quality_score",
+                      "best_quality_score",
+                      "quality_score_sum",
+                      "scored_verified_count",
+                      "total_reels",
+                      "trust_number",
+                      "pending_reels",
+                      "rejected_reels",
+                      "verified_reels",
+                      "quality_score_counts",
+                    ];
+                    const dateFields = [
+                      "created_at",
+                      "updated_at",
+                      "date_of_birth",
+                    ];
+                    const isEarningsField =
+                      earningsFields.includes(selectedColumnId);
+                    const isMoneyField = moneyFields.includes(selectedColumnId);
+                    const isIntegerField =
+                      integerFields.includes(selectedColumnId);
+                    const isDateField = dateFields.includes(selectedColumnId);
+                    const supportsOperators =
+                      isEarningsField ||
+                      isMoneyField ||
+                      isIntegerField ||
+                      isDateField;
+
+                    const commonOnSelectValueChange = (value: string) => {
+                      setEmptyFilterValue(value);
+                      const selectedColumn =
+                        emptyFilterColumn ||
+                        allColumns[activeTab as keyof typeof allColumns].filter(
+                          isTableFilterColumn,
+                        )[0]?.id ||
+                        "";
+                      if (selectedColumn && value) {
+                        setFilters([
+                          {
+                            id: `filter-${Date.now()}-${Math.random()}`,
+                            column: selectedColumn,
+                            value,
+                            operator: supportsOperators
+                              ? emptyFilterOperator
+                              : undefined,
+                          },
+                        ]);
+                        setEmptyFilterValue("");
+                        setEmptyFilterColumn("");
+                        setEmptyFilterOperator("=");
+                      }
+                    };
+
+                    if (isUserType) {
+                      return (
+                        <Select
+                          value={emptyFilterValue}
+                          onValueChange={commonOnSelectValueChange}
+                        >
+                          <SelectTrigger isDark={isDark} className="w-full">
+                            <SelectValue placeholder="Select user type..." />
+                          </SelectTrigger>
+                          <SelectContent isDark={isDark}>
+                            <SelectItem value="creator" isDark={isDark}>
+                              Creator
+                            </SelectItem>
+                            <SelectItem value="advertiser" isDark={isDark}>
+                              Advertiser
+                            </SelectItem>
+                            <SelectItem value="admin" isDark={isDark}>
+                              Admin
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      );
+                    }
+
+                    if (isGender) {
+                      return (
+                        <Select
+                          value={emptyFilterValue}
+                          onValueChange={commonOnSelectValueChange}
+                        >
+                          <SelectTrigger isDark={isDark} className="w-full">
+                            <SelectValue placeholder="Select gender..." />
+                          </SelectTrigger>
+                          <SelectContent isDark={isDark}>
+                            <SelectItem value="Male" isDark={isDark}>
+                              Male
+                            </SelectItem>
+                            <SelectItem value="Female" isDark={isDark}>
+                              Female
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      );
+                    }
+
+                    if (isCountry) {
+                      return (
+                        <Select
+                          value={emptyFilterValue}
+                          onValueChange={commonOnSelectValueChange}
+                        >
+                          <SelectTrigger isDark={isDark} className="w-full">
+                            <SelectValue placeholder="Select country..." />
+                          </SelectTrigger>
+                          <SelectContent isDark={isDark}>
+                            {ALL_COUNTRIES.map((country) => (
+                              <SelectItem
+                                key={country}
+                                value={country}
+                                isDark={isDark}
+                              >
+                                {country}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      );
+                    }
+
+                    // For earnings and integer fields, show operator dropdown + input
+                    if (supportsOperators) {
+                      return (
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Select
+                            value={emptyFilterOperator}
+                            onValueChange={setEmptyFilterOperator}
+                          >
+                            <SelectTrigger
+                              isDark={isDark}
+                              className="w-full sm:w-20 min-[360px]:w-24"
+                            >
+                              <SelectValue>
+                                {operatorMap[emptyFilterOperator]?.symbol ||
+                                  emptyFilterOperator}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent isDark={isDark}>
+                              <SelectItem value="=" isDark={isDark}>
+                                {operatorMap["="].label}{" "}
+                                {operatorMap["="].symbol}
+                              </SelectItem>
+                              <SelectItem value="!=" isDark={isDark}>
+                                {operatorMap["!="].label}{" "}
+                                {operatorMap["!="].symbol}
+                              </SelectItem>
+                              <SelectItem value=">" isDark={isDark}>
+                                {operatorMap[">"].label}{" "}
+                                {operatorMap[">"].symbol}
+                              </SelectItem>
+                              <SelectItem value="<" isDark={isDark}>
+                                {operatorMap["<"].label}{" "}
+                                {operatorMap["<"].symbol}
+                              </SelectItem>
+                              <SelectItem value=">=" isDark={isDark}>
+                                {operatorMap[">="].label}{" "}
+                                {operatorMap[">="].symbol}
+                              </SelectItem>
+                              <SelectItem value="<=" isDark={isDark}>
+                                {operatorMap["<="].label}{" "}
+                                {operatorMap["<="].symbol}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {isEarningsField || isMoneyField ? (
+                            <div className="flex flex-1 min-w-0">
+                              <span
+                                className={cn(
+                                  "inline-flex items-center justify-center px-1.5 sm:px-2 text-xs border border-r-0 rounded-l-md flex-shrink-0",
+                                  isDark
+                                    ? "bg-[#07031D] border-gray-700 text-white"
+                                    : "bg-gray-50 text-gray-700 border-gray-300",
+                                )}
+                              >
+                                $
+                              </span>
+                              <Input
+                                type="text"
+                                value={emptyFilterValue}
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  setEmptyFilterValue(value);
+                                  const selectedColumn =
+                                    emptyFilterColumn ||
+                                    allColumns[
+                                      activeTab as keyof typeof allColumns
+                                    ].filter(isTableFilterColumn)[0]?.id ||
+                                    "";
+                                  if (selectedColumn && value) {
+                                    setFilters([
+                                      {
+                                        id: `filter-${Date.now()}-${Math.random()}`,
+                                        column: selectedColumn,
+                                        value: value,
+                                        operator: emptyFilterOperator,
+                                      },
+                                    ]);
+                                    setEmptyFilterValue("");
+                                    setEmptyFilterColumn("");
+                                    setEmptyFilterOperator("=");
+                                  }
+                                }}
+                                placeholder="Enter amount..."
+                                className={cn(
+                                  "rounded-l-none border-l-0 flex-1 min-w-0 text-sm",
+                                  isDark
+                                    ? "bg-[#07031D] border-gray-700 text-white"
+                                    : "bg-white border-gray-300",
+                                )}
+                              />
+                            </div>
+                          ) : isDateField ? (
+                            <Input
+                              type="date"
+                              value={emptyFilterValue}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setEmptyFilterValue(value);
+                                const selectedColumn =
+                                  emptyFilterColumn ||
+                                  allColumns[
+                                    activeTab as keyof typeof allColumns
+                                  ].filter(isTableFilterColumn)[0]?.id ||
+                                  "";
+                                if (selectedColumn && value) {
+                                  setFilters([
+                                    {
+                                      id: `filter-${Date.now()}-${Math.random()}`,
+                                      column: selectedColumn,
+                                      value: value,
+                                      operator: emptyFilterOperator,
+                                    },
+                                  ]);
+                                  setEmptyFilterValue("");
+                                  setEmptyFilterColumn("");
+                                  setEmptyFilterOperator("=");
+                                }
+                              }}
+                              placeholder="Select date..."
+                              className={cn(
+                                "flex-1 min-w-0 text-sm",
+                                isDark
+                                  ? "bg-[#07031D] border-gray-700 text-white"
+                                  : "bg-white border-gray-300",
+                              )}
+                            />
+                          ) : (
+                            <Input
+                              type="text"
+                              value={emptyFilterValue}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setEmptyFilterValue(value);
+                                const selectedColumn =
+                                  emptyFilterColumn ||
+                                  allColumns[
+                                    activeTab as keyof typeof allColumns
+                                  ].filter(isTableFilterColumn)[0]?.id ||
+                                  "";
+                                if (selectedColumn && value) {
+                                  setFilters([
+                                    {
+                                      id: `filter-${Date.now()}-${Math.random()}`,
+                                      column: selectedColumn,
+                                      value: value,
+                                      operator: emptyFilterOperator,
+                                    },
+                                  ]);
+                                  setEmptyFilterValue("");
+                                  setEmptyFilterColumn("");
+                                  setEmptyFilterOperator("=");
+                                }
+                              }}
+                              placeholder="Enter value..."
+                              className={cn(
+                                "flex-1 min-w-0 text-sm",
+                                isDark
+                                  ? "bg-[#07031D] border-gray-700 text-white"
+                                  : "bg-white border-gray-300",
+                              )}
+                            />
+                          )}
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <Input
+                        type={isDateField ? "date" : "text"}
+                        value={emptyFilterValue}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setEmptyFilterValue(value);
+                          const selectedColumn =
+                            emptyFilterColumn ||
+                            allColumns[
+                              activeTab as keyof typeof allColumns
+                            ].filter(isTableFilterColumn)[0]?.id ||
+                            "";
+                          if (selectedColumn && value) {
+                            setFilters([
+                              {
+                                id: `filter-${Date.now()}-${Math.random()}`,
+                                column: selectedColumn,
+                                value: value,
+                              },
+                            ]);
+                            setEmptyFilterValue("");
+                            setEmptyFilterColumn("");
+                          }
+                        }}
+                        placeholder={
+                          isDateField
+                            ? "Select date..."
+                            : "Enter filter value..."
+                        }
+                        className={cn(
+                          "text-sm",
+                          isDark
+                            ? "bg-[#07031D] border-gray-700 text-white"
+                            : "bg-white",
+                        )}
+                      />
+                    );
+                  })()}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  disabled
+                  className="text-gray-400 cursor-not-allowed flex-shrink-0"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            ) : (
+              filters.map((filter) => (
+                <div
+                  key={filter.id}
+                  className={cn(
+                    "flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 p-3 sm:p-4 rounded-lg border",
+                    isDark
+                      ? "bg-[#1a102b] border-gray-700"
+                      : "bg-gray-50 border-gray-200",
+                  )}
+                >
+                  <div className="flex-1 min-w-0">
+                    <Select
+                      value={filter.column}
+                      onValueChange={(value) => {
+                        setFilters(
+                          filters.map((f) =>
+                            f.id === filter.id
+                              ? {
+                                  ...f,
+                                  column: value,
+                                  // Clear the previous text/value when changing the column,
+                                  // so old filter text doesn't remain attached to the new field.
+                                  value: "",
+                                  operator: undefined,
+                                }
+                              : f,
+                          ),
+                        );
+                      }}
+                    >
+                      <SelectTrigger isDark={isDark} className="w-full">
+                        <SelectValue placeholder="Select column" />
+                      </SelectTrigger>
+                      <SelectContent isDark={isDark}>
+                        {allColumns[activeTab as keyof typeof allColumns]
+                          .filter(isTableFilterColumn)
+                          .map((column) => (
+                            <SelectItem
+                              key={column.id}
+                              value={column.id}
+                              isDark={isDark}
+                            >
+                              {column.label}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    {filter.column === "user_type" ? (
+                      <Select
+                        value={filter.value}
+                        onValueChange={(value) => {
+                          setFilters(
+                            filters.map((f) =>
+                              f.id === filter.id ? { ...f, value } : f,
+                            ),
+                          );
+                        }}
+                      >
+                        <SelectTrigger isDark={isDark} className="w-full">
+                          <SelectValue placeholder="Select user type..." />
+                        </SelectTrigger>
+                        <SelectContent isDark={isDark}>
+                          <SelectItem value="creator" isDark={isDark}>
+                            Creator
+                          </SelectItem>
+                          <SelectItem value="advertiser" isDark={isDark}>
+                            Advertiser
+                          </SelectItem>
+                          <SelectItem value="admin" isDark={isDark}>
+                            Admin
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : filter.column === "subscription_info" ? (
+                      <Select
+                        value={filter.value}
+                        onValueChange={(value) => {
+                          setFilters(
+                            filters.map((f) =>
+                              f.id === filter.id ? { ...f, value } : f,
+                            ),
+                          );
+                        }}
+                      >
+                        <SelectTrigger isDark={isDark} className="w-full">
+                          <SelectValue placeholder="Select plan..." />
+                        </SelectTrigger>
+                        <SelectContent isDark={isDark}>
+                          {availableSubscriptionPlans.map((plan) => (
+                            <SelectItem
+                              key={plan.id}
+                              value={plan.name}
+                              isDark={isDark}
+                            >
+                              {plan.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : filter.column === "gender" ? (
+                      <Select
+                        value={filter.value}
+                        onValueChange={(value) => {
+                          setFilters(
+                            filters.map((f) =>
+                              f.id === filter.id ? { ...f, value } : f,
+                            ),
+                          );
+                        }}
+                      >
+                        <SelectTrigger isDark={isDark} className="w-full">
+                          <SelectValue placeholder="Select gender..." />
+                        </SelectTrigger>
+                        <SelectContent isDark={isDark}>
+                          <SelectItem value="Male" isDark={isDark}>
+                            Male
+                          </SelectItem>
+                          <SelectItem value="Female" isDark={isDark}>
+                            Female
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : filter.column === "country" ? (
+                      <Select
+                        value={filter.value}
+                        onValueChange={(value) => {
+                          setFilters(
+                            filters.map((f) =>
+                              f.id === filter.id ? { ...f, value } : f,
+                            ),
+                          );
+                        }}
+                      >
+                        <SelectTrigger isDark={isDark} className="w-full">
+                          <SelectValue placeholder="Select country..." />
+                        </SelectTrigger>
+                        <SelectContent isDark={isDark}>
+                          {ALL_COUNTRIES.map((country) => (
+                            <SelectItem
+                              key={country}
+                              value={country}
+                              isDark={isDark}
+                            >
+                              {country}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      (() => {
+                        const earningsFields = [
+                          "affiliate_earnings",
+                          "other_earnings",
+                        ];
+                        const integerFields = [
+                          "coins",
+                          "advertisers_referred",
+                          "creators_referred",
+                          "total_lifetime_coins",
+                          "total_contests_run",
+                          "contests_participated",
+                          "contests_won",
+                          "total_views",
+                          "total_submissions_made",
+                          "total_submissions_won",
+                          "trust_score",
+                          "avg_quality_score",
+                          "best_quality_score",
+                          "quality_score_sum",
+                          "scored_verified_count",
+                          "total_reels",
+                          "trust_number",
+                          "pending_reels",
+                          "rejected_reels",
+                          "verified_reels",
+                          "quality_score_counts",
+                        ];
+                        const moneyFields = [
+                          "total_money_spent",
+                          "available_deposit_balance",
+                          "withdrawable_balance",
+                          "total_money_won",
+                        ];
+                        const dateFields = [
+                          "created_at",
+                          "updated_at",
+                          "date_of_birth",
+                        ];
+                        const isEarningsField = earningsFields.includes(
+                          filter.column,
+                        );
+                        const isIntegerField = integerFields.includes(
+                          filter.column,
+                        );
+                        const isMoneyField = moneyFields.includes(
+                          filter.column,
+                        );
+                        const isDateField = dateFields.includes(filter.column);
+                        const supportsOperators =
+                          isEarningsField ||
+                          isMoneyField ||
+                          isIntegerField ||
+                          isDateField;
+
+                        if (isEarningsField || isMoneyField) {
+                          return (
+                            <div className="flex flex-col sm:flex-row gap-2">
+                              {supportsOperators && (
+                                <Select
+                                  value={filter.operator || "="}
+                                  onValueChange={(value) => {
+                                    setFilters(
+                                      filters.map((f) =>
+                                        f.id === filter.id
+                                          ? { ...f, operator: value }
+                                          : f,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <SelectTrigger
+                                    isDark={isDark}
+                                    className="w-full sm:w-20 min-[360px]:w-24"
+                                  >
+                                    <SelectValue>
+                                      {operatorMap[filter.operator || "="]
+                                        ?.symbol ||
+                                        filter.operator ||
+                                        "="}
+                                    </SelectValue>
+                                  </SelectTrigger>
+                                  <SelectContent isDark={isDark}>
+                                    <SelectItem value="=" isDark={isDark}>
+                                      {operatorMap["="].label}{" "}
+                                      {operatorMap["="].symbol}
+                                    </SelectItem>
+                                    <SelectItem value="!=" isDark={isDark}>
+                                      {operatorMap["!="].label}{" "}
+                                      {operatorMap["!="].symbol}
+                                    </SelectItem>
+                                    <SelectItem value=">" isDark={isDark}>
+                                      {operatorMap[">"].label}{" "}
+                                      {operatorMap[">"].symbol}
+                                    </SelectItem>
+                                    <SelectItem value="<" isDark={isDark}>
+                                      {operatorMap["<"].label}{" "}
+                                      {operatorMap["<"].symbol}
+                                    </SelectItem>
+                                    <SelectItem value=">=" isDark={isDark}>
+                                      {operatorMap[">="].label}{" "}
+                                      {operatorMap[">="].symbol}
+                                    </SelectItem>
+                                    <SelectItem value="<=" isDark={isDark}>
+                                      {operatorMap["<="].label}{" "}
+                                      {operatorMap["<="].symbol}
+                                    </SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              )}
+                              <div className="flex flex-1 min-w-0">
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center justify-center px-1.5 sm:px-2 text-xs border border-r-0 rounded-l-md flex-shrink-0",
+                                    isDark
+                                      ? "bg-[#07031D] border-gray-700 text-white"
+                                      : "bg-gray-50 text-gray-700 border-gray-300",
+                                  )}
+                                >
+                                  $
+                                </span>
+                                <Input
+                                  type="text"
+                                  value={filter.value}
+                                  onChange={(e) => {
+                                    setFilters(
+                                      filters.map((f) =>
+                                        f.id === filter.id
+                                          ? { ...f, value: e.target.value }
+                                          : f,
+                                      ),
+                                    );
+                                  }}
+                                  placeholder="Enter amount..."
+                                  className={cn(
+                                    "rounded-l-none border-l-0 flex-1 min-w-0 text-sm",
+                                    isDark
+                                      ? "bg-[#07031D] border-gray-700 text-white"
+                                      : "bg-white border-gray-300",
+                                  )}
+                                />
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        if (isIntegerField) {
+                          return (
+                            <div className="flex flex-col sm:flex-row gap-2">
+                              <Select
+                                value={filter.operator || "="}
+                                onValueChange={(value) => {
+                                  setFilters(
+                                    filters.map((f) =>
+                                      f.id === filter.id
+                                        ? { ...f, operator: value }
+                                        : f,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <SelectTrigger
+                                  isDark={isDark}
+                                  className="w-full sm:w-20 min-[360px]:w-24"
+                                >
+                                  <SelectValue>
+                                    {operatorMap[filter.operator || "="]
+                                      ?.symbol ||
+                                      filter.operator ||
+                                      "="}
+                                  </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent isDark={isDark}>
+                                  <SelectItem value="=" isDark={isDark}>
+                                    {operatorMap["="].label}{" "}
+                                    {operatorMap["="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="!=" isDark={isDark}>
+                                    {operatorMap["!="].label}{" "}
+                                    {operatorMap["!="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value=">" isDark={isDark}>
+                                    {operatorMap[">"].label}{" "}
+                                    {operatorMap[">"].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="<" isDark={isDark}>
+                                    {operatorMap["<"].label}{" "}
+                                    {operatorMap["<"].symbol}
+                                  </SelectItem>
+                                  <SelectItem value=">=" isDark={isDark}>
+                                    {operatorMap[">="].label}{" "}
+                                    {operatorMap[">="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="<=" isDark={isDark}>
+                                    {operatorMap["<="].label}{" "}
+                                    {operatorMap["<="].symbol}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <Input
+                                type="text"
+                                value={filter.value}
+                                onChange={(e) => {
+                                  setFilters(
+                                    filters.map((f) =>
+                                      f.id === filter.id
+                                        ? { ...f, value: e.target.value }
+                                        : f,
+                                    ),
+                                  );
+                                }}
+                                placeholder="Enter value..."
+                                className={cn(
+                                  "flex-1 min-w-0 text-sm",
+                                  isDark
+                                    ? "bg-[#07031D] border-gray-700 text-white"
+                                    : "bg-white border-gray-300",
+                                )}
+                              />
+                            </div>
+                          );
+                        }
+
+                        if (isDateField) {
+                          return (
+                            <div className="flex flex-col sm:flex-row gap-2">
+                              <Select
+                                value={filter.operator || "="}
+                                onValueChange={(value) => {
+                                  setFilters(
+                                    filters.map((f) =>
+                                      f.id === filter.id
+                                        ? { ...f, operator: value }
+                                        : f,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <SelectTrigger
+                                  isDark={isDark}
+                                  className="w-full sm:w-20 min-[360px]:w-24"
+                                >
+                                  <SelectValue>
+                                    {operatorMap[filter.operator || "="]
+                                      ?.symbol ||
+                                      filter.operator ||
+                                      "="}
+                                  </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent isDark={isDark}>
+                                  <SelectItem value="=" isDark={isDark}>
+                                    {operatorMap["="].label}{" "}
+                                    {operatorMap["="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="!=" isDark={isDark}>
+                                    {operatorMap["!="].label}{" "}
+                                    {operatorMap["!="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value=">" isDark={isDark}>
+                                    {operatorMap[">"].label}{" "}
+                                    {operatorMap[">"].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="<" isDark={isDark}>
+                                    {operatorMap["<"].label}{" "}
+                                    {operatorMap["<"].symbol}
+                                  </SelectItem>
+                                  <SelectItem value=">=" isDark={isDark}>
+                                    {operatorMap[">="].label}{" "}
+                                    {operatorMap[">="].symbol}
+                                  </SelectItem>
+                                  <SelectItem value="<=" isDark={isDark}>
+                                    {operatorMap["<="].label}{" "}
+                                    {operatorMap["<="].symbol}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <Input
+                                type="date"
+                                value={filter.value}
+                                onChange={(e) => {
+                                  setFilters(
+                                    filters.map((f) =>
+                                      f.id === filter.id
+                                        ? { ...f, value: e.target.value }
+                                        : f,
+                                    ),
+                                  );
+                                }}
+                                placeholder="Select date..."
+                                className={cn(
+                                  "flex-1 min-w-0 text-sm",
+                                  isDark
+                                    ? "bg-[#07031D] border-gray-700 text-white"
+                                    : "bg-white border-gray-300",
+                                )}
+                              />
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <Input
+                            type={
+                              filter.column === "created_at" ||
+                              filter.column === "updated_at" ||
+                              filter.column === "date_of_birth"
+                                ? "date"
+                                : "text"
+                            }
+                            value={filter.value}
+                            onChange={(e) => {
+                              setFilters(
+                                filters.map((f) =>
+                                  f.id === filter.id
+                                    ? { ...f, value: e.target.value }
+                                    : f,
+                                ),
+                              );
+                            }}
+                            placeholder={
+                              filter.column === "created_at" ||
+                              filter.column === "updated_at" ||
+                              filter.column === "date_of_birth"
+                                ? "Select date..."
+                                : "Enter filter value..."
+                            }
+                            className={cn(
+                              "text-sm",
+                              isDark
+                                ? "bg-[#07031D] border-gray-700 text-white"
+                                : "bg-white",
+                            )}
+                          />
+                        );
+                      })()
+                    )}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setFilters(filters.filter((f) => f.id !== filter.id));
+                    }}
+                    className="text-red-500 hover:text-red-700 hover:bg-red-50 flex-shrink-0 self-start sm:self-center"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+              ))
+            )}
+            <Button
+              variant="outline"
+              onClick={() => {
+                const availableColumns =
+                  allColumns[activeTab as keyof typeof allColumns].filter(
+                    isTableFilterColumn,
+                  );
+                setFilters([
+                  ...filters,
+                  {
+                    id: `filter-${Date.now()}-${Math.random()}`,
+                    column: availableColumns[0]?.id || "",
+                    value: "",
+                  },
+                ]);
+              }}
+              className={cn(
+                "w-full text-sm sm:text-base",
+                isDark
+                  ? "border-gray-700 text-white hover:bg-gray-800"
+                  : "border-gray-300",
+              )}
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Add Filter
+            </Button>
+            {filters.length > 0 && (
+              <div className="flex flex-col sm:flex-row gap-2 justify-end pt-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setFilters([]);
+                  }}
+                  className={cn(
+                    "w-full sm:w-auto text-sm sm:text-base",
+                    isDark
+                      ? "border-gray-700 text-white hover:bg-gray-800"
+                      : "",
+                  )}
+                >
+                  Clear All
+                </Button>
+                <Button
+                  onClick={() => {
+                    setShowFilterModal(false);
+                  }}
+                  className={cn(
+                    "w-full sm:w-auto text-sm sm:text-base bg-purple-600 text-white hover:bg-purple-700",
+                    isDark && "bg-purple-600 hover:bg-purple-700",
+                  )}
+                >
+                  Apply Filters
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isSubscriptionDialogOpen}
+        onOpenChange={setIsSubscriptionDialogOpen}
+        isdark={isDark}
+      >
+        <DialogContent
+          className={cn(
+            "max-w-3xl max-h-[80vh] overflow-y-auto",
+            isDark ? "text-white" : "text-gray-900",
+          )}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={cn(
+                "text-xl font-semibold",
+                isDark ? "text-white" : "text-gray-900",
+              )}
+            >
+              Subscription Information
+            </DialogTitle>
+            <DialogDescription
+              className={cn("mt-1", isDark ? "text-gray-300" : "text-gray-600")}
+            >
+              Overview of the advertiser&apos;s current subscription plan,
+              billing, and status details.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-6 space-y-6">
+            {selectedSubscriptionInfo ? (
+              (() => {
+                let info: any = selectedSubscriptionInfo;
+                try {
+                  if (typeof info === "string") {
+                    info = JSON.parse(info);
+                  }
+                } catch {
+                  // Keep raw info if JSON parsing fails
+                }
+
+                const plan =
+                  info && info.product_id
+                    ? getSubscriptionPlanById(info.product_id)
+                    : null;
+                const planName =
+                  plan?.displayName ||
+                  plan?.name ||
+                  info?.plan_name ||
+                  "Unknown";
+
+                const amountCents =
+                  typeof info?.price_amount === "number"
+                    ? info.price_amount
+                    : typeof info?.amount_cents === "number"
+                      ? info.amount_cents
+                      : undefined;
+                const formattedAmount =
+                  amountCents !== undefined
+                    ? `$${(amountCents / 100).toFixed(2)}`
+                    : "-";
+
+                const status = info?.status || info?.subscription_status;
+                const interval =
+                  info?.interval ||
+                  info?.billing_interval ||
+                  (info?.price_interval || "").toLowerCase();
+
+                const currentPeriodStart =
+                  info?.current_period_start || info?.billing_period_start;
+                const currentPeriodEnd =
+                  info?.current_period_end || info?.billing_period_end;
+                const cancelAtPeriodEnd = info?.cancel_at_period_end;
+
+                const formatDate = (value: any) => {
+                  if (!value) return "-";
+                  try {
+                    const d =
+                      typeof value === "string" || typeof value === "number"
+                        ? new Date(value)
+                        : value;
+                    if (Number.isNaN(d.getTime())) return String(value);
+                    return d.toLocaleString();
+                  } catch {
+                    return String(value);
+                  }
+                };
+
+                const statusColorClasses =
+                  status === "active" || status === "trialing"
+                    ? isDark
+                      ? "bg-emerald-900/60 text-emerald-200 border-emerald-700"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-300"
+                    : status === "canceled" || status === "incomplete_expired"
+                      ? isDark
+                        ? "bg-rose-900/60 text-rose-200 border-rose-700"
+                        : "bg-rose-50 text-rose-700 border-rose-300"
+                      : status === "past_due" || status === "unpaid"
+                        ? isDark
+                          ? "bg-amber-900/60 text-amber-200 border-amber-700"
+                          : "bg-amber-50 text-amber-700 border-amber-300"
+                        : isDark
+                          ? "bg-slate-800 text-slate-100 border-slate-700"
+                          : "bg-slate-50 text-slate-700 border-slate-300";
+
+                return (
+                  <div className="space-y-6">
+                    {/* Top summary card */}
+                    <div
+                      className={cn(
+                        "rounded-xl border p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4",
+                        isDark
+                          ? "bg-[#1a102b] border-purple-700/50"
+                          : "bg-gradient-to-r from-purple-50 to-indigo-50 border-purple-100",
+                      )}
+                    >
+                      <div className="space-y-1.5">
+                        <p
+                          className={cn(
+                            "text-xs uppercase tracking-wide",
+                            isDark ? "text-gray-300" : "text-gray-600",
+                          )}
+                        >
+                          Current Plan
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-lg font-semibold">
+                            {planName}
+                          </span>
+                          {interval && (
+                            <span className="text-xs rounded-full border px-2 py-0.5 uppercase tracking-wide">
+                              {interval}
+                            </span>
+                          )}
+                        </div>
+                        <p
+                          className={cn(
+                            "text-sm",
+                            isDark ? "text-gray-200" : "text-gray-900",
+                          )}
+                        >
+                          {formattedAmount}{" "}
+                          {interval ? `/ ${interval.toLowerCase()}` : ""}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-col items-start sm:items-end gap-2">
+                        {status && (
+                          <span
+                            className={cn(
+                              "inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium",
+                              statusColorClasses,
+                            )}
+                          >
+                            <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-current" />
+                            {String(status).replace(/_/g, " ")}
+                          </span>
+                        )}
+                        {cancelAtPeriodEnd && (
+                          <span className="text-xs text-amber-500">
+                            Will cancel at end of current period
+                          </span>
+                        )}
+                        {info?.last_synced && (
+                          <span className="text-xs text-muted-foreground">
+                            Last synced: {formatDate(info.last_synced)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Billing period & IDs */}
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div
+                        className={cn(
+                          "rounded-lg border p-4 space-y-2",
+                          isDark
+                            ? "bg-[#130b21] border-slate-700"
+                            : "bg-white border-slate-200",
+                        )}
+                      >
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Billing Period
+                        </p>
+                        <div className="space-y-1.5 text-sm">
+                          <div className="flex justify-between gap-4">
+                            <span className="text-muted-foreground">
+                              Current period start
+                            </span>
+                            <span className="font-medium text-right">
+                              {formatDate(currentPeriodStart)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-muted-foreground">
+                              Current period end
+                            </span>
+                            <span className="font-medium text-right">
+                              {formatDate(currentPeriodEnd)}
+                            </span>
+                          </div>
+                          {info?.trial_start || info?.trial_end ? (
+                            <>
+                              <div className="flex justify-between gap-4">
+                                <span className="text-muted-foreground">
+                                  Trial start
+                                </span>
+                                <span className="font-medium text-right">
+                                  {formatDate(info.trial_start)}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-4">
+                                <span className="text-muted-foreground">
+                                  Trial end
+                                </span>
+                                <span className="font-medium text-right">
+                                  {formatDate(info.trial_end)}
+                                </span>
+                              </div>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div
+                        className={cn(
+                          "rounded-lg border p-4 space-y-2",
+                          isDark
+                            ? "bg-[#130b21] border-slate-700"
+                            : "bg-white border-slate-200",
+                        )}
+                      >
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Stripe Identifiers
+                        </p>
+                        <div className="space-y-1.5 text-xs sm:text-sm">
+                          {info?.subscription_id && (
+                            <div className="flex justify-between gap-4">
+                              <span className="text-muted-foreground">
+                                Subscription ID
+                              </span>
+                              <span className="font-mono text-[11px] sm:text-xs text-right break-all">
+                                {info.subscription_id}
+                              </span>
+                            </div>
+                          )}
+                          {info?.price_id && (
+                            <div className="flex justify-between gap-4">
+                              <span className="text-muted-foreground">
+                                Price ID
+                              </span>
+                              <span className="font-mono text-[11px] sm:text-xs text-right break-all">
+                                {info.price_id}
+                              </span>
+                            </div>
+                          )}
+                          {info?.product_id && (
+                            <div className="flex justify-between gap-4">
+                              <span className="text-muted-foreground">
+                                Product ID
+                              </span>
+                              <span className="font-mono text-[11px] sm:text-xs text-right break-all">
+                                {info.product_id}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <p
+                className={cn(
+                  "text-sm",
+                  isDark ? "text-gray-300" : "text-muted-foreground",
+                )}
+              >
+                No subscription information is available for this advertiser.
+              </p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isSubcategoriesDialogOpen}
+        onOpenChange={setIsSubcategoriesDialogOpen}
+        isdark={isDark}
+      >
+        <DialogContent
+          className={cn(
+            "max-w-3xl max-h-[80vh] overflow-y-auto",
+            isDark ? "text-white" : "text-gray-900",
+          )}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={cn(isDark ? "text-white" : "text-gray-900")}
+            >
+              Subcategories
+            </DialogTitle>
+            <DialogDescription
+              className={cn(isDark ? "text-gray-300" : "text-gray-600")}
+            >
+              Complete list of subcategories for this creator
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-4">
+            {(() => {
+              // Parse and organize subcategories by category
+              let subcategoriesByCategory: Record<string, string[]> = {};
+              let flatSubcategories: string[] = [];
+
+              if (selectedSubcategories) {
+                // Handle different formats
+                if (Array.isArray(selectedSubcategories)) {
+                  selectedSubcategories.forEach((item: any) => {
+                    if (typeof item === "object" && item !== null) {
+                      // Format: {category: string, subcategory: string}
+                      if (item.category && item.subcategory) {
+                        if (!subcategoriesByCategory[item.category]) {
+                          subcategoriesByCategory[item.category] = [];
+                        }
+                        if (
+                          !subcategoriesByCategory[item.category].includes(
+                            item.subcategory,
+                          )
+                        ) {
+                          subcategoriesByCategory[item.category].push(
+                            item.subcategory,
+                          );
+                        }
+                      } else {
+                        // Could be a different object format, format it nicely
+                        // Try to extract meaningful properties
+                        const keys = Object.keys(item);
+                        if (keys.length > 0) {
+                          // If object has a name or title, use that
+                          const displayValue =
+                            item.name ||
+                            item.title ||
+                            item.label ||
+                            (keys.length === 1
+                              ? item[keys[0]]
+                              : JSON.stringify(item));
+                          flatSubcategories.push(String(displayValue));
+                        } else {
+                          flatSubcategories.push(JSON.stringify(item));
+                        }
+                      }
+                    } else if (typeof item === "string") {
+                      flatSubcategories.push(item);
+                    }
+                  });
+                } else if (typeof selectedSubcategories === "object") {
+                  // Format: Record<string, string[]> (object with category keys)
+                  subcategoriesByCategory = selectedSubcategories as Record<
+                    string,
+                    string[]
+                  >;
+                } else if (typeof selectedSubcategories === "string") {
+                  // Try to parse JSON string
+                  try {
+                    const parsed = JSON.parse(selectedSubcategories);
+                    if (Array.isArray(parsed)) {
+                      parsed.forEach((item: any) => {
+                        if (
+                          typeof item === "object" &&
+                          item?.category &&
+                          item?.subcategory
+                        ) {
+                          if (!subcategoriesByCategory[item.category]) {
+                            subcategoriesByCategory[item.category] = [];
+                          }
+                          if (
+                            !subcategoriesByCategory[item.category].includes(
+                              item.subcategory,
+                            )
+                          ) {
+                            subcategoriesByCategory[item.category].push(
+                              item.subcategory,
+                            );
+                          }
+                        } else if (typeof item === "object" && item !== null) {
+                          // Handle objects in parsed array
+                          const keys = Object.keys(item);
+                          if (keys.length > 0) {
+                            const displayValue =
+                              item.name ||
+                              item.title ||
+                              item.label ||
+                              (keys.length === 1
+                                ? item[keys[0]]
+                                : JSON.stringify(item));
+                            flatSubcategories.push(String(displayValue));
+                          } else {
+                            flatSubcategories.push(JSON.stringify(item));
+                          }
+                        } else {
+                          flatSubcategories.push(String(item));
+                        }
+                      });
+                    } else if (typeof parsed === "object") {
+                      subcategoriesByCategory = parsed;
+                    }
+                  } catch {
+                    flatSubcategories.push(selectedSubcategories);
+                  }
+                }
+              }
+
+              // Parse categories if available
+              let categoriesList: string[] = [];
+              if (selectedCategories) {
+                if (Array.isArray(selectedCategories)) {
+                  categoriesList = selectedCategories.filter(
+                    (cat) => typeof cat === "string",
+                  );
+                } else if (typeof selectedCategories === "string") {
+                  try {
+                    const parsed = JSON.parse(selectedCategories);
+                    if (Array.isArray(parsed)) {
+                      categoriesList = parsed.filter(
+                        (cat) => typeof cat === "string",
+                      );
+                    }
+                  } catch {
+                    categoriesList = [selectedCategories];
+                  }
+                }
+              }
+
+              // Get all unique category names
+              const allCategories = Array.from(
+                new Set([
+                  ...categoriesList,
+                  ...Object.keys(subcategoriesByCategory),
+                ]),
+              );
+
+              const hasOrganizedSubcategories =
+                Object.keys(subcategoriesByCategory).length > 0;
+              const hasFlatSubcategories = flatSubcategories.length > 0;
+              const totalCount =
+                Object.values(subcategoriesByCategory).reduce(
+                  (sum, arr) => sum + arr.length,
+                  0,
+                ) + flatSubcategories.length;
+
+              if (!hasOrganizedSubcategories && !hasFlatSubcategories) {
+                return (
+                  <p
+                    className={cn(
+                      isDark ? "text-gray-300" : "text-muted-foreground",
+                    )}
+                  >
+                    No subcategories available
+                  </p>
+                );
+              }
+
+              return (
+                <div className="space-y-6">
+                  {/* Summary */}
+                  <div>
+                    <span
+                      className={cn(
+                        "text-sm font-medium",
+                        isDark ? "text-gray-200" : "text-gray-900",
+                      )}
+                    >
+                      Total: {totalCount} subcategories
+                    </span>
+                  </div>
+
+                  {/* Subcategories organized by category */}
+                  {hasOrganizedSubcategories && (
+                    <div className="space-y-4">
+                      {allCategories.map((category) => {
+                        const subcats = subcategoriesByCategory[category];
+                        if (!subcats || subcats.length === 0) return null;
+
+                        return (
+                          <div key={category} className="space-y-2">
+                            <h3
+                              className={cn(
+                                "text-base font-semibold capitalize",
+                                isDark ? "text-white" : "text-foreground",
+                              )}
+                            >
+                              {category}
+                            </h3>
+                            <div className="flex flex-wrap gap-2">
+                              {subcats.map((subcat, index) => (
+                                <Badge
+                                  key={index}
+                                  variant="secondary"
+                                  className={cn(
+                                    "text-sm py-1.5 px-3 font-normal",
+                                    isDark
+                                      ? "bg-[#391A6A] text-gray-200 border-purple-500"
+                                      : "",
+                                  )}
+                                >
+                                  {subcat}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Flat subcategories (if any that couldn't be organized) */}
+                  {hasFlatSubcategories && (
+                    <div className="space-y-2">
+                      <h3
+                        className={cn(
+                          "text-base font-semibold",
+                          isDark ? "text-white" : "text-foreground",
+                        )}
+                      >
+                        Other Subcategories
+                      </h3>
+                      <div className="flex flex-wrap gap-2">
+                        {flatSubcategories.map((subcat, index) => (
+                          <Badge
+                            key={index}
+                            variant="secondary"
+                            className={cn(
+                              "text-sm py-1.5 px-3 font-normal",
+                              isDark
+                                ? "bg-[#391A6A] text-gray-200 border-purple-500"
+                                : "",
+                            )}
+                          >
+                            {subcat}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isInterestsDialogOpen}
+        onOpenChange={setIsInterestsDialogOpen}
+        isdark={isDark}
+      >
+        <DialogContent
+          className={cn(
+            "max-w-3xl max-h-[80vh] overflow-y-auto",
+            isDark ? "text-white" : "text-gray-900",
+          )}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={cn(isDark ? "text-white" : "text-gray-900")}
+            >
+              All Interests
+            </DialogTitle>
+            <DialogDescription
+              className={cn(isDark ? "text-gray-300" : "text-gray-600")}
+            >
+              Complete list of interests for this creator
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-4">
+            {(() => {
+              let interestsArray: string[] = [];
+
+              if (selectedInterests) {
+                if (Array.isArray(selectedInterests)) {
+                  interestsArray = selectedInterests.filter(
+                    (item: any) => typeof item === "string",
+                  );
+                } else if (typeof selectedInterests === "string") {
+                  try {
+                    const parsed = JSON.parse(selectedInterests);
+                    if (Array.isArray(parsed)) {
+                      interestsArray = parsed.filter(
+                        (item: any) => typeof item === "string",
+                      );
+                    } else {
+                      interestsArray = [selectedInterests];
+                    }
+                  } catch {
+                    interestsArray = selectedInterests
+                      .split(",")
+                      .map((s) => s.trim());
+                  }
+                }
+              }
+
+              const totalCount = interestsArray.length;
+
+              if (totalCount === 0) {
+                return (
+                  <p
+                    className={cn(
+                      isDark ? "text-gray-300" : "text-muted-foreground",
+                    )}
+                  >
+                    No interests available
+                  </p>
+                );
+              }
+
+              return (
+                <div className="space-y-6">
+                  {/* Summary */}
+                  <div>
+                    <span
+                      className={cn(
+                        "text-sm font-medium",
+                        isDark ? "text-gray-200" : "text-gray-900",
+                      )}
+                    >
+                      Total: {totalCount} interests
+                    </span>
+                  </div>
+
+                  {/* Interests as badges */}
+                  <div className="flex flex-wrap gap-2">
+                    {interestsArray.map((interest, index) => (
+                      <Badge
+                        key={index}
+                        variant="secondary"
+                        className={cn(
+                          "text-sm py-1.5 px-3 font-normal",
+                          isDark
+                            ? "bg-[#391A6A] text-gray-200 border-purple-500"
+                            : "",
+                        )}
+                      >
+                        {interest}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
